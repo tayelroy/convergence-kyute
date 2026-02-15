@@ -11,7 +11,7 @@ import { VaultHeroCard } from "@/components/ui/vault-hero-card";
 
 export default function LandingPage() {
   return (
-    <main className="relative min-h-screen pt-40 bg-[#0a0a0f]">
+    <main className="relative min-h-screen pt-40 bg-[#020617]">
       <Header1 />
 
       {/* Live Arbitrage Pulse — independently positioned above the lamp */}
@@ -41,7 +41,7 @@ export default function LandingPage() {
           >
             Decentralized Funding Rate Arbitrage Vault
             <br />
-            <span className="text-neutral-600">
+            <span className="text-neutral-500">
               Powered by Chainlink CRE & Boros Pendle
             </span>
           </motion.p>

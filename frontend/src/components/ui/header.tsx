@@ -84,7 +84,7 @@ function Header1() {
                                     <NavigationMenuTrigger className="font-medium text-sm bg-transparent">
                                         {item.title}
                                     </NavigationMenuTrigger>
-                                    <NavigationMenuContent className="!w-[450px] p-4 bg-black/90 backdrop-blur-xl border-white/10">
+                                    <NavigationMenuContent className="!w-[450px] p-4 bg-[#020617]/90 backdrop-blur-xl border-white/10">
                                         <div className="flex flex-col lg:grid grid-cols-2 gap-4">
                                             <div className="flex flex-col h-full justify-between">
                                                 <div className="flex flex-col">
@@ -140,7 +140,7 @@ function Header1() {
                         {isOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
                     </Button>
                     {isOpen && (
-                        <div className="absolute top-20 border-t border-white/10 flex flex-col w-full right-0 bg-black/95 backdrop-blur-2xl shadow-2xl py-6 px-4 container gap-8 z-[110]">
+                        <div className="absolute top-20 border-t border-white/10 flex flex-col w-full right-0 bg-[#020617]/95 backdrop-blur-2xl shadow-2xl py-6 px-4 container gap-8 z-[110]">
                             {navigationItems.map((item) => (
                                 <div key={item.title}>
                                     <div className="flex flex-col gap-2">
