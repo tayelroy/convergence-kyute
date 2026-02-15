@@ -6,24 +6,31 @@ import { LampContainer } from "@/components/ui/lamp";
 import { ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Header1 } from "@/components/ui/header";
+import { LiveArbitragePulse } from "@/components/ui/live-arbitrage-pulse";
+import { VaultHeroCard } from "@/components/ui/vault-hero-card";
 
 export default function LandingPage() {
   return (
-    <main className="relative min-h-screen pt-10 bg-[#0a0a0f]">
+    <main className="relative min-h-screen pt-40 bg-[#0a0a0f]">
       <Header1 />
-      <LampContainer>
-        <motion.h1
-          initial={{ opacity: 0.5, y: 100 }}
-          whileInView={{ opacity: 1, y: 0 }}
-          transition={{
-            delay: 0.3,
-            duration: 0.8,
-            ease: "easeInOut",
-          }}
-          className="bg-gradient-to-br from-white to-neutral-500 py-4 bg-clip-text text-center text-4xl font-medium tracking-tight text-transparent md:text-7xl"
-        >
-          Kyute
-        </motion.h1>
+
+      {/* Live Arbitrage Pulse — independently positioned above the lamp */}
+      <div className="relative z-50 flex justify-center mb-6">
+        <LiveArbitragePulse />
+      </div>
+
+      <LampContainer>        <motion.h1
+        initial={{ opacity: 0.5, y: 100 }}
+        whileInView={{ opacity: 1, y: 0 }}
+        transition={{
+          delay: 0.3,
+          duration: 0.8,
+          ease: "easeInOut",
+        }}
+        className="bg-gradient-to-br from-white to-neutral-500 py-4 bg-clip-text text-center text-4xl font-medium tracking-tight text-transparent md:text-7xl"
+      >
+        Kyute
+      </motion.h1>
 
         <div className="flex flex-col items-center gap-6 mt-4">
           <motion.p
@@ -65,6 +72,9 @@ export default function LandingPage() {
               </Button>
             </Link>
           </motion.div>
+
+          {/* Vault Hero Card — below the CTA */}
+          <VaultHeroCard />
         </div>
       </LampContainer>
     </main>
