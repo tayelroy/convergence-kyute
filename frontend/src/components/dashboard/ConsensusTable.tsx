@@ -55,12 +55,15 @@ export function ConsensusTable() {
                 [...rows].reverse().forEach((row: any) => {
                     const asset = row.asset_symbol;
                     const fixed = FIXED_RATES[asset] || 0;
-                    const median = row.median_apr || 0;
-                    const spread = (median - fixed) * 100; // % to bps
+                    const medianRaw = row.median_apr || 0;
+                    // Annualize: raw * 3 * 365 * 100
+                    const medianAnnual = medianRaw * 3 * 365 * 100;
+                    const spread = (medianAnnual - fixed) * 100; // % to bps
 
                     latestStats[asset] = {
                         asset,
-                        cexMedian: median,
+
+                        cexMedian: medianAnnual,
                         fixedRate: fixed,
                         spreadBps: spread,
                         timestamp: row.timestamp
@@ -93,8 +96,9 @@ export function ConsensusTable() {
                     const newRow = payload.new as any;
                     const asset = newRow.asset_symbol;
                     const fixed = FIXED_RATES[asset] || 0;
-                    const median = newRow.median_apr || 0;
-                    const spread = (median - fixed) * 100;
+                    const medianRaw = newRow.median_apr || 0;
+                    const medianAnnual = medianRaw * 3 * 365 * 100;
+                    const spread = (medianAnnual - fixed) * 100;
 
                     // Update state with new row
                     setData(prev => {
@@ -102,7 +106,8 @@ export function ConsensusTable() {
                         const idx = next.findIndex(r => r.asset === asset);
                         const newItem: RateRow = {
                             asset,
-                            cexMedian: median,
+
+                            cexMedian: medianAnnual,
                             fixedRate: fixed,
                             spreadBps: spread,
                             timestamp: newRow.timestamp

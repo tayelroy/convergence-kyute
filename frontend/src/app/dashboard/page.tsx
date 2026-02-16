@@ -41,23 +41,8 @@ export default function DashboardPage() {
                     </div>
 
                     {/* Charts Row */}
-                    <div className="grid grid-cols-2 gap-4 h-40">
+                    <div className="h-[500px]">
                         <CandleStickChart /> {/* BTC Chart */}
-
-                        {/* Info Panel / Total PnL (Mock) */}
-                        <div className="bg-[#080808] border border-[#1a1a1a] p-4 flex flex-col justify-between">
-                            <div>
-                                <h3 className="text-xs text-[#666] uppercase">Total Vault PnL (Est.)</h3>
-                                <div className="text-3xl font-bold text-[#00ff00] font-mono mt-2 flex items-baseline">
-                                    +$1,294.05
-                                    <span className="text-xs text-[#00ff00] ml-2 opacity-60">(+2.4%)</span>
-                                </div>
-                            </div>
-                            <div className="flex items-center space-x-2 text-xs text-[#444]">
-                                <Wallet size={12} />
-                                <span>0x71C...92A1</span>
-                            </div>
-                        </div>
                     </div>
 
                     {/* Main Table */}
