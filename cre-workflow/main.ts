@@ -1,8 +1,11 @@
 import { z } from "zod";
 import dotenv from "dotenv";
 import path from "path";
+import { fileURLToPath } from "url";
 
 // Load .env from project root
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 // ──────────────────────────────────────────────
@@ -338,14 +341,10 @@ async function pushToSupabase(
 //       const rates = await runtime.runInNodeMode(
 //         async (nodeRuntime) => {
 //           const http = nodeRuntime.getCapability("http");
-//           return fetchGlobalRates(http);
-//         },
-//         consensusMedianAggregation
-//       );
 //
-//       // ... spread calculation & execution logic ...
-//     }
-//   );
+async function sleep(ms: number) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
 
 // ── Local simulation entry point ──
 async function main() {
@@ -355,27 +354,38 @@ async function main() {
     console.log(`  Hyperliquid API:   ${config.hyperliquidApiUrl}`);
     console.log(`  Supabase:          ${config.supabaseUrl ? "Enabled" : "Disabled"}`);
     console.log(`  Min Spread:        ${config.minSpreadThresholdBps} bps`);
-    console.log();
-    console.log("Fetching global funding rates...");
 
     const httpClient = { fetch: globalThis.fetch };
+    const POLL_INTERVAL_MS = 30000; // 30 seconds
 
-    try {
-        const rates = await fetchGlobalRates(httpClient);
-        console.log();
-        console.log("━━━ Consensus Results (R_cex) ━━━");
-        console.log(`  BTC median rate:  ${rates.btc.medianRate.toFixed(4)}% APR`);
-        console.log(`    Sources: ${rates.btc.sources.map((s) => `${s.venue}(${s.fundingRate.toFixed(4)}%)`).join(", ")}`);
-        console.log(`  ETH median rate:  ${rates.eth.medianRate.toFixed(4)}% APR`);
-        console.log(`    Sources: ${rates.eth.sources.map((s) => `${s.venue}(${s.fundingRate.toFixed(4)}%)`).join(", ")}`);
-        console.log(`  Timestamp:        ${new Date(rates.timestamp).toISOString()}`);
+    console.log(`Starting surveillance loop (Interval: ${POLL_INTERVAL_MS / 1000}s)...`);
 
-        console.log();
-        console.log("━━━ Data Persistence ━━━");
-        await pushToSupabase(httpClient, rates);
+    while (true) {
+        try {
+            const startTime = Date.now();
+            console.log(`\n[${new Date().toLocaleTimeString()}] Fetching global funding rates...`);
 
-    } catch (err) {
-        console.error("Failed to fetch rates:", err);
+            const rates = await fetchGlobalRates(httpClient);
+
+            console.log("  ━━━ Consensus Results (R_cex) ━━━");
+            console.log(`  BTC median rate:  ${rates.btc.medianRate.toFixed(4)}% APR`);
+            // console.log(`    Sources: ${rates.btc.sources.map((s) => `${s.venue}(${s.fundingRate.toFixed(4)}%)`).join(", ")}`);
+            console.log(`  ETH median rate:  ${rates.eth.medianRate.toFixed(4)}% APR`);
+            // console.log(`    Sources: ${rates.eth.sources.map((s) => `${s.venue}(${s.fundingRate.toFixed(4)}%)`).join(", ")}`);
+
+            console.log("  ━━━ Data Persistence ━━━");
+            await pushToSupabase(httpClient, rates);
+
+            // Wait for next tick
+            const elapsed = Date.now() - startTime;
+            const delay = Math.max(0, POLL_INTERVAL_MS - elapsed);
+            await sleep(delay);
+
+        } catch (err) {
+            console.error("Failed to fetch rates:", err);
+            // Wait before retrying on error
+            await sleep(10000);
+        }
     }
 }
 
