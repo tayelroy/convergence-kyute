@@ -78,7 +78,8 @@ async function fetchBinanceRates(
 
         if (data.length > 0) {
             const item = data[0];
-            // Binance returns 8h rate as decimal — annualize: rate * 3 * 365 * 100
+            // Binance returns per-8h rate as a decimal (e.g. 0.0001 = 0.01%)
+            // Annualize: rate × 3 periods/day × 365 days × 100 (to %)
             const annualizedRate = parseFloat(item.fundingRate) * 3 * 365 * 100;
             results.push({
                 venue: "binance",
@@ -86,6 +87,7 @@ async function fetchBinanceRates(
                 fundingRate: annualizedRate,
                 fundingTime: item.fundingTime,
             });
+            console.log(`  [DEBUG] Binance ${item.symbol}: 8hPct=${(parseFloat(item.fundingRate) * 100).toFixed(4)}%, annualized=${annualizedRate.toFixed(4)}%`);
         }
     }
 
@@ -96,51 +98,75 @@ async function fetchBinanceRates(
 // Hyperliquid data fetching
 // ──────────────────────────────────────────────
 
-/** Raw Hyperliquid /info fundingHistory response item */
-interface HyperliquidFundingItem {
-    coin: string;
-    fundingRate: string;
+/** Asset context from Hyperliquid metaAndAssetCtxs response */
+interface HyperliquidAssetCtx {
+    funding: string;      // current predicted 8h funding rate (decimal)
+    openInterest: string;
+    prevDayPx: string;
+    dayNtlVlm: string;
     premium: string;
-    time: number;
+    oraclePx: string;
+    markPx: string;
+    midPx: string;
+    impactPxs: string[];
+}
+
+/** Meta info for each asset */
+interface HyperliquidAssetMeta {
+    name: string;
+    szDecimals: number;
 }
 
 /**
- * Fetch latest funding rates from Hyperliquid for given coins.
- * Uses POST /info with { type: "fundingHistory" }.
+ * Fetch CURRENT predicted funding rates from Hyperliquid.
+ * Uses POST /info with { type: "metaAndAssetCtxs" }.
+ *
+ * Why not fundingHistory?
+ *   fundingHistory returns OLD settled rates, not the live predicted
+ *   rate shown on the UI. metaAndAssetCtxs gives the real-time rate.
  */
 async function fetchHyperliquidRates(
     httpClient: { fetch: typeof fetch },
     coins: string[]
 ): Promise<VenueFundingRate[]> {
+    const response = await httpClient.fetch(config.hyperliquidApiUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "metaAndAssetCtxs" }),
+    });
+
+    // Response shape: [{ universe: AssetMeta[] }, AssetCtx[]]
+    const [meta, assetCtxs] = (await response.json()) as [
+        { universe: HyperliquidAssetMeta[] },
+        HyperliquidAssetCtx[]
+    ];
+
     const results: VenueFundingRate[] = [];
-    const now = Date.now();
 
     for (const coin of coins) {
-        const response = await httpClient.fetch(config.hyperliquidApiUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-                type: "fundingHistory",
-                coin,
-                startTime: now - 3600_000, // last hour
-                endTime: now,
-            }),
+        // Find the index of the coin in the universe array
+        const idx = meta.universe.findIndex((a) => a.name === coin);
+        if (idx === -1) continue;
+
+        const ctx = assetCtxs[idx];
+        const rawRate = parseFloat(ctx.funding);
+
+        // Hyperliquid returns per-1h funding rate
+        // Annualize: rate × 24 hours/day × 365 days × 100 (to %)
+        const annualizedRate = rawRate * 24 * 365 * 100;
+        const rate8h = rawRate * 8;
+
+        console.log(`  [DEBUG] Hyperliquid ${coin}: raw=${ctx.funding}, 8hPct=${(rate8h * 100).toFixed(4)}%, annualized=${annualizedRate.toFixed(4)}%`);
+
+        results.push({
+            venue: "hyperliquid",
+            symbol: `${coin}USDT`,
+            fundingRate: annualizedRate,
+            fundingTime: Date.now(),
         });
 
-        const data = (await response.json()) as HyperliquidFundingItem[];
-
-        if (data.length > 0) {
-            // Take the most recent entry
-            const latest = data[data.length - 1];
-            // Hyperliquid returns 8h rate as decimal — annualize same as Binance
-            const annualizedRate = parseFloat(latest.fundingRate) * 3 * 365 * 100;
-            results.push({
-                venue: "hyperliquid",
-                symbol: `${latest.coin}USDT`,
-                fundingRate: annualizedRate,
-                fundingTime: latest.time,
-            });
-        }
+        // Also log to console for visibility
+        // console.log(`  [DEBUG] Hyperliquid ${coin}: 8hPct=${(rawRate * 100).toFixed(4)}%`);
     }
 
     return results;
