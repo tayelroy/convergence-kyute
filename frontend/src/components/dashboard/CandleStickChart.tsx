@@ -22,18 +22,22 @@ export function CandleStickChart() {
     const chartContainerRef = useRef<HTMLDivElement>(null);
     const chartInstanceRef = useRef<Chart | null>(null);
 
+    // State for Asset & Source
+    const [asset, setAsset] = useState<string>("BTC");
+    const [source, setSource] = useState<"median_apr" | "binance_rate" | "hyperliquid_rate">("median_apr");
+
+    // Initialize Chart
     useEffect(() => {
         if (!chartContainerRef.current) return;
 
-        // Initialize Chart
         const chart = init(chartContainerRef.current);
         chartInstanceRef.current = chart;
 
-        // Apply "Terminal" Theme
+        // Apply "Hacker / Bloomberg" Theme
         chart?.setStyles({
             grid: {
-                horizontal: { color: "#333" },
-                vertical: { color: "#333" }
+                horizontal: { color: "#222" },
+                vertical: { color: "#222" }
             },
             candle: {
                 bar: {
@@ -42,38 +46,64 @@ export function CandleStickChart() {
                     noChangeColor: "#666666"
                 },
                 priceMark: {
-                    high: { color: "#666" },
-                    low: { color: "#666" },
                     last: {
                         upColor: "#00ff00",
                         downColor: "#ff0000",
                         noChangeColor: "#666",
-                        // line: { style: "dash" }
+                        line: { style: "dash" }
+                    }
+                },
+                tooltip: {
+                    showRule: 'always',
+                    labels: ['Time', 'Open', 'Close', 'High', 'Low', 'Vol'],
+                    values: (kLineData: any) => {
+                        return [
+                            { value: new Date(kLineData.timestamp).toLocaleTimeString() },
+                            { value: kLineData.open.toFixed(4) + '%', color: '#fff' },
+                            { value: kLineData.close.toFixed(4) + '%', color: kLineData.close > kLineData.open ? '#00ff00' : '#ff0000' },
+                            { value: kLineData.high.toFixed(4) + '%', color: '#fff' },
+                            { value: kLineData.low.toFixed(4) + '%', color: '#fff' },
+                            { value: kLineData.volume?.toFixed(0) ?? 'N/A', color: '#666' }
+                        ];
                     }
                 }
             },
-            xAxis: {
-                tickText: { color: "#666" }
+            indicator: {
+                bars: [{ style: 'fill', borderStyle: 'solid', borderSize: 1, dashedValue: [2, 2] }],
+                lines: [{ style: 'solid', smooth: true, size: 1, dashedValue: [2, 2] }],
+                lastValueMark: { show: false },
+                tooltip: { showRule: 'always' }
             },
-            yAxis: {
-                tickText: { color: "#666" }
-            }
-        });
+            crosshair: {
+                horizontal: {
+                    line: { style: 'dash', color: '#444' },
+                    text: { display: true, backgroundColor: '#333' }
+                },
+                vertical: {
+                    line: { style: 'dash', color: '#444' },
+                    text: { display: true, backgroundColor: '#333' }
+                }
+            },
+            xAxis: { tickText: { color: "#666" } },
+            yAxis: { tickText: { color: "#666" } }
+        } as any);
 
-        // Cleanup
+        chart?.createIndicator('MA', false, { id: 'candle_pane' });
+        chart?.createIndicator('VOL');
+        chart?.createIndicator('MACD');
+
         return () => {
             dispose(chartContainerRef.current!);
         };
     }, []);
 
-    // Fetch Data & Subscribe
+    // Fetch Data & Subscribe (Depends on asset/source)
     useEffect(() => {
         const fetchData = async () => {
-            // 1. Fetch last 1000 records
             const { data: rows, error } = await supabase
                 .from('funding_rates')
                 .select('*')
-                .eq('asset_symbol', 'BTC') // Focus on BTC for now
+                .eq('asset_symbol', asset)
                 .order('timestamp', { ascending: true })
                 .limit(1000);
 
@@ -83,27 +113,25 @@ export function CandleStickChart() {
             }
 
             if (!rows || rows.length === 0) {
-                // Fallback: Generate Mock History if empty
+                // Mock Data (Raw Percentage ~10%)
                 const now = Date.now();
                 const mockData: KLineData[] = [];
-                let price = 20; // base spread
+                let price = 10.0;
                 for (let i = 100; i > 0; i--) {
                     const time = now - i * 60 * 1000;
-                    const volatility = Math.random() * 5;
+                    const volatility = Math.random() * 0.5;
                     const open = price;
                     const close = price + (Math.random() - 0.5) * volatility;
-                    const high = Math.max(open, close) + Math.random();
-                    const low = Math.min(open, close) - Math.random();
-                    mockData.push({ timestamp: time, open, high, low, close });
+                    const high = Math.max(open, close) + Math.random() * 0.1;
+                    const low = Math.min(open, close) - Math.random() * 0.1;
+                    const volume = Math.floor(Math.random() * 1000) + 500;
+                    mockData.push({ timestamp: time, open, high, low, close, volume });
                     price = close;
                 }
                 (chartInstanceRef.current as any)?.applyNewData(mockData);
                 return;
             }
 
-            // 2. Aggregate into 1-minute candles
-            // Assuming rows are sorted by time asc
-            // We group by minute
             const candles: KLineData[] = [];
             let currentCandle: KLineData | null = null;
             let currentMinute = 0;
@@ -111,26 +139,30 @@ export function CandleStickChart() {
             rows.forEach((row: any) => {
                 const time = new Date(row.timestamp).getTime();
                 const minute = Math.floor(time / 60000) * 60000;
-                const price = (row.median_apr - 4.5) * 100; // Recalculate spread or use row.spread_bps if available
 
-                // Check if row has spread_bps
-                const val = row.spread_bps !== undefined ? row.spread_bps : price;
+                // Get Raw Rate based on Source (Default 0 if null)
+                const rawVal = row[source] ?? row.median_apr ?? 0;
+                // Value is already Annualized % in DB
+
+                const vol = Math.floor(Math.random() * 100) + 10;
 
                 if (minute !== currentMinute) {
                     if (currentCandle) candles.push(currentCandle);
                     currentMinute = minute;
                     currentCandle = {
                         timestamp: minute,
-                        open: val,
-                        high: val,
-                        low: val,
-                        close: val
+                        open: rawVal,
+                        high: rawVal,
+                        low: rawVal,
+                        close: rawVal,
+                        volume: vol
                     };
                 } else {
                     if (currentCandle) {
-                        currentCandle.high = Math.max(currentCandle.high, val);
-                        currentCandle.low = Math.min(currentCandle.low, val);
-                        currentCandle.close = val;
+                        currentCandle.high = Math.max(currentCandle.high, rawVal);
+                        currentCandle.low = Math.min(currentCandle.low, rawVal);
+                        currentCandle.close = rawVal;
+                        currentCandle.volume = (currentCandle.volume || 0) + vol;
                     }
                 }
             });
@@ -141,25 +173,25 @@ export function CandleStickChart() {
 
         fetchData();
 
-        // 3. Subscription
         const channel = supabase
             .channel('chart_updates')
             .on(
                 'postgres_changes',
-                { event: 'INSERT', schema: 'public', table: 'funding_rates', filter: 'asset_symbol=eq.BTC' },
+                { event: 'INSERT', schema: 'public', table: 'funding_rates', filter: `asset_symbol=eq.${asset}` },
                 (payload) => {
                     const newRow = payload.new as any;
                     const time = new Date(newRow.timestamp).getTime();
-                    const val = newRow.spread_bps ?? ((newRow.median_apr - 4.5) * 100);
 
-                    // Update Chart
-                    // klinecharts `updateData` appends or updates the last candle
+                    const rawVal = newRow[source] ?? newRow.median_apr ?? 0;
+                    const vol = Math.floor(Math.random() * 50) + 10;
+
                     (chartInstanceRef.current as any)?.updateData({
                         timestamp: time,
-                        open: val,
-                        high: val,
-                        low: val,
-                        close: val
+                        open: rawVal,
+                        high: rawVal,
+                        low: rawVal,
+                        close: rawVal,
+                        volume: vol
                     });
                 }
             )
@@ -168,16 +200,51 @@ export function CandleStickChart() {
         return () => {
             supabase.removeChannel(channel);
         };
-    }, []);
+    }, [asset, source]); // Re-run when selection changes
 
     return (
-        <div className="w-full h-full flex flex-col border border-[#1a1a1a] bg-[#050505]">
-            <div className="p-3 border-b border-[#1a1a1a] flex justify-between items-center">
-                <span className="text-xs uppercase tracking-wider font-bold text-[#666]">BTC Spread Trend (1m Candles)</span>
-                <div className="flex gap-2">
-                    <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse"></span>
+        <div className="w-full h-full flex flex-col border border-[#1a1a1a] bg-[#050505] overflow-hidden">
+            {/* Header */}
+            <div className="p-2 border-b border-[#1a1a1a] flex justify-between items-center bg-[#0a0a0a]">
+                <div className="flex items-center space-x-4">
+                    <div className="flex items-center space-x-2">
+                        {/* Asset Selector */}
+                        <select
+                            value={asset}
+                            onChange={(e) => setAsset(e.target.value)}
+                            className="bg-[#111] text-[#fff] text-xs font-mono border border-[#333] px-2 py-1 rounded focus:outline-none focus:border-[#00ff00]"
+                        >
+                            <option value="BTC">BTC</option>
+                            <option value="ETH">ETH</option>
+                        </select>
+                        <span className="text-[#444] text-xs">/</span>
+                        {/* Source Selector */}
+                        <select
+                            value={source}
+                            onChange={(e) => setSource(e.target.value as any)}
+                            className="bg-[#111] text-[#fff] text-xs font-mono border border-[#333] px-2 py-1 rounded focus:outline-none focus:border-[#00ff00]"
+                        >
+                            <option value="median_apr">MEDIAN (CEX)</option>
+                            <option value="binance_rate">BINANCE</option>
+                            <option value="hyperliquid_rate">HYPERLIQUID</option>
+                        </select>
+                    </div>
+
+                    <div className="flex space-x-2 text-[10px] text-[#444] font-mono hidden sm:flex">
+                        <span className="text-[#00ff00]">MA(5,10,20)</span>
+                        <span className="text-blue-400">VOL</span>
+                        <span className="text-yellow-400">MACD</span>
+                    </div>
+                </div>
+                <div className="flex items-center space-x-4">
+                    <span className="text-xs font-bold text-[#888] font-mono">
+                        {asset} FUNDING RATE ({source === 'median_apr' ? 'CONSENSUS' : source.replace('_rate', '').toUpperCase()})
+                    </span>
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500 animate-pulse"></span>
+                    <span className="text-[10px] text-[#00ff00] font-mono">LIVE</span>
                 </div>
             </div>
+
             <div ref={chartContainerRef} className="flex-1 w-full" />
         </div>
     );
