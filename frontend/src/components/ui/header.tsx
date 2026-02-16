@@ -1,6 +1,7 @@
 "use client";
 
 import { Button } from "@/components/ui/button";
+import { GradientButton } from "@/components/ui/gradient-button";
 import {
     NavigationMenu,
     NavigationMenuContent,
@@ -93,9 +94,9 @@ function Header1() {
                                                         {item.description}
                                                     </p>
                                                 </div>
-                                                <Button size="sm" className="mt-10 bg-[#009a22] hover:bg-[#009a22]/90 text-white border-0">
+                                                <GradientButton size="sm" variant="variant" className="mt-10 border-0">
                                                     View Docs
-                                                </Button>
+                                                </GradientButton>
                                             </div>
                                             <div className="flex flex-col text-sm h-full justify-end">
                                                 {item.items?.map((subItem) => (
@@ -130,9 +131,9 @@ function Header1() {
                     </Button>
                     <div className="border-r border-white/10 hidden md:inline h-6 self-center"></div>
                     <Link href="/dashboard">
-                        <Button className="bg-[#009a22] hover:bg-[#009a22]/90 text-white font-semibold px-6 border-0">
+                        <GradientButton variant="variant" className="font-semibold px-6 transition-all duration-300">
                             Launch App
-                        </Button>
+                        </GradientButton>
                     </Link>
                 </div>
                 <div className="flex w-12 shrink lg:hidden items-center justify-end">
@@ -164,7 +165,7 @@ function Header1() {
                             <div className="flex flex-col gap-4 mt-4 pt-6 border-t border-white/5">
                                 <Button variant="outline" className="text-white border-white/10 bg-white/5">Sign in</Button>
                                 <Link href="/dashboard" className="w-full">
-                                    <Button className="w-full bg-[#009a22] hover:bg-[#009a22]/90 text-white border-0">Launch App</Button>
+                                    <GradientButton variant="variant" className="w-full font-semibold">Launch App</GradientButton>
                                 </Link>
                             </div>
                         </div>
