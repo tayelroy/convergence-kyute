@@ -4,7 +4,7 @@ import Link from "next/link";
 import { motion } from "framer-motion";
 import { LampContainer } from "@/components/ui/lamp";
 import { ArrowRight } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { GradientButton } from "@/components/ui/gradient-button";
 import { Header1 } from "@/components/ui/header";
 import { LiveArbitragePulse } from "@/components/ui/live-arbitrage-pulse";
 import { VaultHeroCard } from "@/components/ui/vault-hero-card";
@@ -52,13 +52,9 @@ export default function LandingPage() {
             transition={{ delay: 0.8, duration: 0.8 }}
           >
             <Link href="/dashboard">
-              <Button
-                variant="ghost"
-                className="rounded-[1.15rem] px-8 py-6 text-lg font-semibold backdrop-blur-md 
-                bg-white/95 hover:bg-white/100 dark:bg-black/95 dark:hover:bg-black/100 
-                text-black dark:text-[#009a22] transition-all duration-300 
-                group-hover:-translate-y-0.5 border border-black/10 dark:border-[#009a22]/30
-                hover:shadow-md dark:hover:shadow-[#009a22]/20 group"
+              <GradientButton
+                variant="variant"
+                className="rounded-[1.15rem] px-8 py-6 text-xl font-semibold backdrop-blur-md group"
               >
                 <span className="opacity-90 group-hover:opacity-100 transition-opacity">
                   Enter Dashboard
@@ -69,7 +65,7 @@ export default function LandingPage() {
                 >
                   <ArrowRight className="h-5 w-5" />
                 </span>
-              </Button>
+              </GradientButton>
             </Link>
           </motion.div>
 
