@@ -1,0 +1,23 @@
+{
+    "name": "kyute-workflow",
+    "version": "0.1.0",
+    "description": "Kyute CRE workflow — decentralized funding rate arbitrage via Chainlink Runtime Environment",
+    "type": "module",
+    "main": "main.ts",
+    "scripts": {
+        "dev": "bun run main.ts",
+        "simulate": "cre simulate",
+        "typecheck": "tsc --noEmit"
+    },
+    "dependencies": {
+        "@chainlink/cre-sdk": "latest",
+        "zod": "^3.23.0"
+    },
+    "devDependencies": {
+        "@types/bun": "latest",
+        "typescript": "^5.5.0"
+    },
+    "engines": {
+        "bun": ">=1.2.21"
+    }
+}
