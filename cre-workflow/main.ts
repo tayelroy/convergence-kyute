@@ -1,4 +1,9 @@
 import { z } from "zod";
+import dotenv from "dotenv";
+import path from "path";
+
+// Load .env from project root
+dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 // ──────────────────────────────────────────────
 // Config Schema — validated at startup via Zod
@@ -25,10 +30,19 @@ const ConfigSchema = z.object({
 
     /** Minimum net spread (in basis points) required to trigger execution */
     minSpreadThresholdBps: z.number().int().min(1).default(20),
+
+    /** Supabase Project URL */
+    supabaseUrl: z.string().url().optional(),
+
+    /** Supabase Anon/Service Key */
+    supabaseKey: z.string().optional(),
 });
 
 type Config = z.infer<typeof ConfigSchema>;
-const config: Config = ConfigSchema.parse({});
+const config: Config = ConfigSchema.parse({
+    supabaseUrl: process.env.SUPABASE_URL,
+    supabaseKey: process.env.SUPABASE_KEY,
+});
 
 // ──────────────────────────────────────────────
 // Types
@@ -245,6 +259,72 @@ async function fetchGlobalRates(
 }
 
 // ──────────────────────────────────────────────
+// Data Persistence (Supabase)
+// ──────────────────────────────────────────────
+
+/**
+ * Pushes consensus rates to Supabase `funding_rates` table.
+ * 
+ * Table Schema expected:
+ * - timestamp: timestamptz
+ * - asset_symbol: text (BTC, ETH)
+ * - median_apr: numeric
+ * - binance_rate: numeric
+ * - hyperliquid_rate: numeric
+ */
+async function pushToSupabase(
+    httpClient: { fetch: typeof fetch },
+    rates: ConsensusRates
+) {
+    if (!config.supabaseUrl || !config.supabaseKey) {
+        console.log("  [INFO] Skipping Supabase push (credentials not provided)");
+        return;
+    }
+
+    const endpoint = `${config.supabaseUrl}/rest/v1/funding_rates`;
+
+    // Flatten data for insertion
+    const payload = [
+        {
+            timestamp: new Date(rates.timestamp).toISOString(),
+            asset_symbol: "BTC",
+            median_apr: rates.btc.medianRate,
+            binance_rate: rates.btc.sources.find(s => s.venue === "binance")?.fundingRate ?? null,
+            hyperliquid_rate: rates.btc.sources.find(s => s.venue === "hyperliquid")?.fundingRate ?? null,
+        },
+        {
+            timestamp: new Date(rates.timestamp).toISOString(),
+            asset_symbol: "ETH",
+            median_apr: rates.eth.medianRate,
+            binance_rate: rates.eth.sources.find(s => s.venue === "binance")?.fundingRate ?? null,
+            hyperliquid_rate: rates.eth.sources.find(s => s.venue === "hyperliquid")?.fundingRate ?? null,
+        }
+    ];
+
+    try {
+        const response = await httpClient.fetch(endpoint, {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "apikey": config.supabaseKey,
+                "Authorization": `Bearer ${config.supabaseKey}`,
+                "Prefer": "return=minimal", // Don't return the inserted rows
+            },
+            body: JSON.stringify(payload),
+        });
+
+        if (!response.ok) {
+            const errorText = await response.text();
+            console.error(`  [ERROR] Failed to push to Supabase: ${response.status} ${response.statusText} - ${errorText}`);
+        } else {
+            console.log("  [SUCCESS] Pushed 2 records to Supabase funding_rates table");
+        }
+    } catch (err) {
+        console.error("  [ERROR] Supabase network error:", err);
+    }
+}
+
+// ──────────────────────────────────────────────
 // CRE Workflow Handler
 // ──────────────────────────────────────────────
 //
@@ -273,13 +353,15 @@ async function main() {
     console.log("Config validated:");
     console.log(`  Binance API:       ${config.binanceApiUrl}`);
     console.log(`  Hyperliquid API:   ${config.hyperliquidApiUrl}`);
-    console.log(`  Boros Market:      ${config.borosMarketAddress}`);
+    console.log(`  Supabase:          ${config.supabaseUrl ? "Enabled" : "Disabled"}`);
     console.log(`  Min Spread:        ${config.minSpreadThresholdBps} bps`);
     console.log();
     console.log("Fetching global funding rates...");
 
+    const httpClient = { fetch: globalThis.fetch };
+
     try {
-        const rates = await fetchGlobalRates();
+        const rates = await fetchGlobalRates(httpClient);
         console.log();
         console.log("━━━ Consensus Results (R_cex) ━━━");
         console.log(`  BTC median rate:  ${rates.btc.medianRate.toFixed(4)}% APR`);
@@ -287,6 +369,11 @@ async function main() {
         console.log(`  ETH median rate:  ${rates.eth.medianRate.toFixed(4)}% APR`);
         console.log(`    Sources: ${rates.eth.sources.map((s) => `${s.venue}(${s.fundingRate.toFixed(4)}%)`).join(", ")}`);
         console.log(`  Timestamp:        ${new Date(rates.timestamp).toISOString()}`);
+
+        console.log();
+        console.log("━━━ Data Persistence ━━━");
+        await pushToSupabase(httpClient, rates);
+
     } catch (err) {
         console.error("Failed to fetch rates:", err);
     }

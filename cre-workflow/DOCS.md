@@ -100,7 +100,13 @@ Each node fetches independently via `runInNodeMode`, then results are aggregated
 
 ## Configuration
 
-All parameters are validated at startup using **Zod**:
+All parameters are validated at startup. You can configure them via environment variables in a `.env` file at the **project root**.
+
+Example `.env`:
+```bash
+SUPABASE_URL=https://your-project.supabase.co
+SUPABASE_KEY=eyJh...
+```
 
 | Parameter | Type | Default | Description |
 |---|---|---|---|
