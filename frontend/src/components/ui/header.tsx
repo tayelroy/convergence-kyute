@@ -129,12 +129,6 @@ function Header1() {
                     <Button variant="ghost" className="hidden md:inline text-[#a1a1aa] hover:text-white">
                         Sign in
                     </Button>
-                    <div className="border-r border-white/10 hidden md:inline h-6 self-center"></div>
-                    <Link href="/dashboard">
-                        <GradientButton variant="variant" className="font-semibold px-6 transition-all duration-300">
-                            Launch App
-                        </GradientButton>
-                    </Link>
                 </div>
                 <div className="flex w-12 shrink lg:hidden items-center justify-end">
                     <Button variant="ghost" onClick={() => setOpen(!isOpen)} className="text-white">
@@ -164,9 +158,6 @@ function Header1() {
                             ))}
                             <div className="flex flex-col gap-4 mt-4 pt-6 border-t border-white/5">
                                 <Button variant="outline" className="text-white border-white/10 bg-white/5">Sign in</Button>
-                                <Link href="/dashboard" className="w-full">
-                                    <GradientButton variant="variant" className="w-full font-semibold">Launch App</GradientButton>
-                                </Link>
                             </div>
                         </div>
                     )}
