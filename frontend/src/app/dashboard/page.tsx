@@ -5,7 +5,7 @@ import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { TickerTape } from "@/components/dashboard/TickerTape";
 import { ConsensusTable } from "@/components/dashboard/ConsensusTable";
 import { HealthWidget } from "@/components/dashboard/HealthWidget";
-import { SpreadChart } from "@/components/dashboard/SpreadChart";
+import { CandleStickChart } from "@/components/dashboard/CandleStickChart";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
 import { Wallet, Settings, Bell } from "lucide-react";
 
@@ -42,7 +42,7 @@ export default function DashboardPage() {
 
                     {/* Charts Row */}
                     <div className="grid grid-cols-2 gap-4 h-40">
-                        <SpreadChart /> {/* BTC Chart */}
+                        <CandleStickChart /> {/* BTC Chart */}
 
                         {/* Info Panel / Total PnL (Mock) */}
                         <div className="bg-[#080808] border border-[#1a1a1a] p-4 flex flex-col justify-between">
