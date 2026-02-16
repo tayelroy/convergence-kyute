@@ -1,0 +1,14 @@
+# Editor
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+
+# Dependencies (root-level)
+node_modules/
+package-lock.json
+
+# Environment
+.env
+.env.local
