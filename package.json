@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@pendle/sdk-boros": "^1.1.30"
+  }
+}
