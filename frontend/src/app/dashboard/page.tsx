@@ -21,13 +21,13 @@ export default function DashboardPage() {
             {/* 1. Header / Ticker */}
             <TickerTape />
 
-            <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6">
+            <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6 min-h-0">
 
                 {/* LEFT COLUMN: Main Data (8 cols) */}
-                <div className="col-span-8 flex flex-col space-y-6">
+                <div className="col-span-8 flex flex-col h-full gap-6 overflow-hidden">
 
-                    {/* Header Row */}
-                    <div className="flex items-center justify-between">
+                    {/* Header Row - Fixed Height */}
+                    <div className="flex-none flex items-center justify-between">
                         <div>
                             <h1 className="text-2xl font-bold text-white tracking-tight">MARKET SURVEILLANCE</h1>
                             <p className="text-xs text-[#666] font-mono mt-1">
@@ -46,22 +46,27 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    {/* Charts Row */}
-                    <div className="h-[500px]">
+                    {/* Charts Row - Flexible Height (takes ~60% of remaining space) */}
+                    <div className="flex-[3] min-h-0 relative border border-[#1a1a1a] bg-[#050505] overflow-hidden rounded-sm">
                         <KlineChartProWrapper /> {/* BTC Chart */}
                     </div>
 
-                    {/* Main Table */}
-                    <div className="flex-1">
+                    {/* Main Table - Flexible Height (takes ~40% of remaining space) */}
+                    <div className="flex-[2] min-h-0 relative overflow-hidden">
                         <ConsensusTable />
                     </div>
 
                 </div>
 
                 {/* RIGHT COLUMN: Execution & Logs (4 cols) */}
-                <div className="col-span-4 flex flex-col h-full space-y-6">
-                    <PredictedFundingWidget />
-                    <ExecutionConsole />
+                <div className="col-span-4 flex flex-col h-full gap-6 overflow-hidden">
+                    <div className="flex-none">
+                        <PredictedFundingWidget />
+                    </div>
+
+                    <div className="flex-1 min-h-0 relative overflow-hidden">
+                        <ExecutionConsole />
+                    </div>
                 </div>
 
             </main>
