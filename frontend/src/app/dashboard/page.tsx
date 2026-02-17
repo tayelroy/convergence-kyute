@@ -5,7 +5,7 @@ import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { TickerTape } from "@/components/dashboard/TickerTape";
 import { ConsensusTable } from "@/components/dashboard/ConsensusTable";
 import { HealthWidget } from "@/components/dashboard/HealthWidget";
-import { CandleStickChart } from "@/components/dashboard/CandleStickChart";
+import { KlineChartProWrapper } from "@/components/dashboard/KlineChartPro";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
 import { Wallet, Settings, Bell } from "lucide-react";
 
@@ -42,7 +42,7 @@ export default function DashboardPage() {
 
                     {/* Charts Row */}
                     <div className="h-[500px]">
-                        <CandleStickChart /> {/* BTC Chart */}
+                        <KlineChartProWrapper /> {/* BTC Chart */}
                     </div>
 
                     {/* Main Table */}
