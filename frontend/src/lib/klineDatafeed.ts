@@ -47,18 +47,19 @@ export class FundingRateDatafeed implements Datafeed {
      * Pull historical k-line data
      */
     async getHistoryKLineData(symbol: SymbolInfo, period: Period, from: number, to: number): Promise<KLineData[]> {
+        // Query the 5-minute candlestick view
+        // Columns: bucket, asset_symbol, open, high, low, close, volume
         const { data: rows, error } = await supabase
-            .from('funding_rates')
+            .from('funding_candlesticks_5m')
             .select('*')
             .eq('asset_symbol', symbol.ticker)
-            // Filter by time range if possible, or just limit
-            .gte('timestamp', new Date(from).toISOString())
-            .lte('timestamp', new Date(to).toISOString())
-            .order('timestamp', { ascending: true });
+            .gte('bucket', new Date(from).toISOString())
+            .lte('bucket', new Date(to).toISOString())
+            .order('bucket', { ascending: true })
+            .limit(1000); // Reasonable limit for chart load
 
         if (error) {
             console.error("Datafeed Error:", error);
-            // Return empty array or handle error
             return [];
         }
 
@@ -66,33 +67,14 @@ export class FundingRateDatafeed implements Datafeed {
             return [];
         }
 
-        const candles: KLineData[] = [];
-        let currentCandle: KLineData | null = null;
-
-        // Group by period (simplified: we'll assume 1-minute intervals for now from DB)
-        // Adjust aggregation logic based on `period` if needed.
-        // For this MVP, we map each row to a candle if it mimics high-freq data,
-        // or aggregate if we want strict period adherence.
-
-        rows.forEach((row: any) => {
-            const time = new Date(row.timestamp).getTime();
-
-            // Use median_apr as the "price"
-            const val = row.median_apr ?? 0;
-
-            // Mock OHLC from single value + volatility for visual appeal if needed,
-            // or just flat line if real data calls for it. 
-            // Existing chart had mock volatility, let's keep it simple for now:
-
-            candles.push({
-                timestamp: time,
-                open: val,
-                high: val,
-                low: val,
-                close: val,
-                volume: Math.random() * 100 // Mock volume
-            });
-        });
+        const candles: KLineData[] = rows.map((row: any) => ({
+            timestamp: new Date(row.bucket).getTime(),
+            open: Number(row.open),
+            high: Number(row.high),
+            low: Number(row.low),
+            close: Number(row.close),
+            volume: Number(row.volume)
+        }));
 
         return candles;
     }

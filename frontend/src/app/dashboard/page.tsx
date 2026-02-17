@@ -5,7 +5,12 @@ import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { TickerTape } from "@/components/dashboard/TickerTape";
 import { ConsensusTable } from "@/components/dashboard/ConsensusTable";
 import { HealthWidget } from "@/components/dashboard/HealthWidget";
-import { KlineChartProWrapper } from "@/components/dashboard/KlineChartPro";
+import dynamic from "next/dynamic";
+
+const KlineChartProWrapper = dynamic(
+    () => import("@/components/dashboard/KlineChartPro").then((mod) => mod.KlineChartProWrapper),
+    { ssr: false }
+);
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
 import { PredictedFundingWidget } from "@/components/dashboard/PredictedFundingWidget";
 import { Wallet, Settings, Bell } from "lucide-react";
