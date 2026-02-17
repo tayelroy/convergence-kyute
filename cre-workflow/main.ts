@@ -14,10 +14,7 @@ dotenv.config({ path: path.resolve(__dirname, "../.env") });
 
 const ConfigSchema = z.object({
     /** Binance Futures funding rate API endpoint */
-    binanceApiUrl: z
-        .string()
-        .url()
-        .default("https://fapi.binance.com/fapi/v1/fundingRate"),
+
 
     /** Hyperliquid L1 funding rate API endpoint */
     hyperliquidApiUrl: z
@@ -53,7 +50,7 @@ const config: Config = ConfigSchema.parse({
 
 /** Standardized funding rate for a single asset from a single venue */
 interface VenueFundingRate {
-    venue: "binance" | "hyperliquid";
+    venue: "hyperliquid";
     symbol: string;
     fundingRate: number;   // annualized APR (%)
     fundingTime: number;   // unix ms
@@ -66,50 +63,7 @@ interface ConsensusRates {
     timestamp: number;
 }
 
-// ──────────────────────────────────────────────
-// Binance data fetching
-// ──────────────────────────────────────────────
 
-/** Raw Binance /fapi/v1/fundingRate response item */
-interface BinanceFundingRateItem {
-    symbol: string;
-    fundingRate: string;
-    fundingTime: number;
-    markPrice: string;
-}
-
-/**
- * Fetch latest funding rates from Binance for given symbols.
- * Each DON node calls this independently inside runInNodeMode.
- */
-async function fetchBinanceRates(
-    httpClient: { fetch: typeof fetch },
-    symbols: string[]
-): Promise<VenueFundingRate[]> {
-    const results: VenueFundingRate[] = [];
-
-    for (const symbol of symbols) {
-        const url = `${config.binanceApiUrl}?symbol=${symbol}&limit=1`;
-        const response = await httpClient.fetch(url);
-        const data = (await response.json()) as BinanceFundingRateItem[];
-
-        if (data.length > 0) {
-            const item = data[0];
-            // Binance returns per-8h rate as a decimal (e.g. 0.0001 = 0.01%)
-            // Annualize: rate × 3 periods/day × 365 days × 100 (to %)
-            const annualizedRate = parseFloat(item.fundingRate) * 3 * 365 * 100;
-            results.push({
-                venue: "binance",
-                symbol: item.symbol,
-                fundingRate: annualizedRate,
-                fundingTime: item.fundingTime,
-            });
-            console.log(`  [DEBUG] Binance ${item.symbol}: 8hPct=${(parseFloat(item.fundingRate) * 100).toFixed(4)}%, annualized=${annualizedRate.toFixed(4)}%`);
-        }
-    }
-
-    return results;
-}
 
 // ──────────────────────────────────────────────
 // Hyperliquid data fetching
@@ -239,12 +193,9 @@ async function fetchGlobalRates(
     httpClient: { fetch: typeof fetch } = { fetch: globalThis.fetch }
 ): Promise<ConsensusRates> {
     // ── 1. Parallel fetch from both venues ──
-    const [binanceRates, hyperliquidRates] = await Promise.all([
-        fetchBinanceRates(httpClient, ["BTCUSDT", "ETHUSDT"]),
-        fetchHyperliquidRates(httpClient, ["BTC", "ETH"]),
-    ]);
+    const hyperliquidRates = await fetchHyperliquidRates(httpClient, ["BTC", "ETH"]);
 
-    const allRates = [...binanceRates, ...hyperliquidRates];
+    const allRates = [...hyperliquidRates];
 
     // ── 2. Group by asset ──
     const btcRates = allRates.filter((r) => r.symbol.startsWith("BTC"));
@@ -272,7 +223,6 @@ async function fetchGlobalRates(
  * - timestamp: timestamptz
  * - asset_symbol: text (BTC, ETH)
  * - median_apr: numeric
- * - binance_rate: numeric
  * - hyperliquid_rate: numeric
  */
 async function pushToSupabase(
@@ -292,14 +242,12 @@ async function pushToSupabase(
             timestamp: new Date(rates.timestamp).toISOString(),
             asset_symbol: "BTC",
             median_apr: rates.btc.medianRate,
-            binance_rate: rates.btc.sources.find(s => s.venue === "binance")?.fundingRate ?? null,
             hyperliquid_rate: rates.btc.sources.find(s => s.venue === "hyperliquid")?.fundingRate ?? null,
         },
         {
             timestamp: new Date(rates.timestamp).toISOString(),
             asset_symbol: "ETH",
             median_apr: rates.eth.medianRate,
-            binance_rate: rates.eth.sources.find(s => s.venue === "binance")?.fundingRate ?? null,
             hyperliquid_rate: rates.eth.sources.find(s => s.venue === "hyperliquid")?.fundingRate ?? null,
         }
     ];
@@ -350,7 +298,7 @@ async function sleep(ms: number) {
 async function main() {
     console.log("━━━ Kyute CRE Workflow ━━━");
     console.log("Config validated:");
-    console.log(`  Binance API:       ${config.binanceApiUrl}`);
+
     console.log(`  Hyperliquid API:   ${config.hyperliquidApiUrl}`);
     console.log(`  Supabase:          ${config.supabaseUrl ? "Enabled" : "Disabled"}`);
     console.log(`  Min Spread:        ${config.minSpreadThresholdBps} bps`);
@@ -392,5 +340,5 @@ async function main() {
 main();
 
 // ── Exports ──
-export { ConfigSchema, config, fetchGlobalRates, fetchBinanceRates, fetchHyperliquidRates, medianOf, filterOutliers };
+export { ConfigSchema, config, fetchGlobalRates, fetchHyperliquidRates, medianOf, filterOutliers };
 export type { Config, VenueFundingRate, ConsensusRates };
