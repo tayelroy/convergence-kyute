@@ -7,6 +7,7 @@ import { ConsensusTable } from "@/components/dashboard/ConsensusTable";
 import { HealthWidget } from "@/components/dashboard/HealthWidget";
 import { KlineChartProWrapper } from "@/components/dashboard/KlineChartPro";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
+import { PredictedFundingWidget } from "@/components/dashboard/PredictedFundingWidget";
 import { Wallet, Settings, Bell } from "lucide-react";
 
 export default function DashboardPage() {
@@ -53,7 +54,8 @@ export default function DashboardPage() {
                 </div>
 
                 {/* RIGHT COLUMN: Execution & Logs (4 cols) */}
-                <div className="col-span-4 flex flex-col h-full">
+                <div className="col-span-4 flex flex-col h-full space-y-6">
+                    <PredictedFundingWidget />
                     <ExecutionConsole />
                 </div>
 
