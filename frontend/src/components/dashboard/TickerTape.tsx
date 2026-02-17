@@ -30,17 +30,29 @@ export function TickerTape() {
         <div className="w-full h-10 bg-[#0a0a0a] border-b border-[#1a1a1a] flex items-center overflow-hidden whitespace-nowrap">
             {/* Mock Data for now - will wire to real props later */}
             <div className="animate-ticker flex">
-                <TickerItem symbol="BTC Funding" price={5.47} change={1.2} />
-                <TickerItem symbol="ETH Funding" price={0.61} change={-0.4} />
-                <TickerItem symbol="BTC Spread" price={45} change={5.0} isSpread />
-                <TickerItem symbol="ETH Spread" price={12} change={-2.0} isSpread />
-                <div className="flex items-center px-6 text-[#444] text-xs">
-                    <Activity size={12} className="mr-2" />
-                    MARKET STATUS: ACTIVE
+                {/* 1st set of items */}
+                <div className="flex shrink-0">
+                    <TickerItem symbol="BTC Funding" price={5.47} change={1.2} />
+                    <TickerItem symbol="ETH Funding" price={0.61} change={-0.4} />
+                    <TickerItem symbol="BTC Spread" price={45} change={5.0} isSpread />
+                    <TickerItem symbol="ETH Spread" price={12} change={-2.0} isSpread />
+                    <div className="flex items-center px-6 text-[#444] text-xs border-r border-[#1a1a1a]">
+                        <Activity size={12} className="mr-2" />
+                        MARKET STATUS: ACTIVE
+                    </div>
                 </div>
-                {/* Duplicate for infinite scroll loop if needed */}
-                <TickerItem symbol="BTC Funding" price={5.47} change={1.2} />
-                <TickerItem symbol="ETH Funding" price={0.61} change={-0.4} />
+
+                {/* 2nd set of items (duplicate for seamless loop) */}
+                <div className="flex shrink-0">
+                    <TickerItem symbol="BTC Funding" price={5.47} change={1.2} />
+                    <TickerItem symbol="ETH Funding" price={0.61} change={-0.4} />
+                    <TickerItem symbol="BTC Spread" price={45} change={5.0} isSpread />
+                    <TickerItem symbol="ETH Spread" price={12} change={-2.0} isSpread />
+                    <div className="flex items-center px-6 text-[#444] text-xs border-r border-[#1a1a1a]">
+                        <Activity size={12} className="mr-2" />
+                        MARKET STATUS: ACTIVE
+                    </div>
+                </div>
             </div>
         </div>
     );

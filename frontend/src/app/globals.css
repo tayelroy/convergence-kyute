@@ -245,6 +245,29 @@
   to {
     --border-angle: 360deg;
   }
+
+  to {
+    --border-angle: 360deg;
+  }
+}
+
+@keyframes ticker {
+  0% {
+    transform: translateX(0);
+  }
+
+  100% {
+    transform: translateX(-50%);
+  }
+}
+
+.animate-ticker {
+  animation: ticker 30s linear infinite;
+  width: max-content;
+}
+
+.animate-ticker:hover {
+  animation-play-state: paused;
 }
 
 /* ─── Gradient button component styles ─── */
