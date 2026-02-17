@@ -69,32 +69,19 @@ interface ConsensusRates {
 // Hyperliquid data fetching
 // ──────────────────────────────────────────────
 
-/** Asset context from Hyperliquid metaAndAssetCtxs response */
-interface HyperliquidAssetCtx {
-    funding: string;      // current predicted 8h funding rate (decimal)
-    openInterest: string;
-    prevDayPx: string;
-    dayNtlVlm: string;
-    premium: string;
-    oraclePx: string;
-    markPx: string;
-    midPx: string;
-    impactPxs: string[];
+// Response structure for predictedFundings: [ [ "AVAX", [ ["BinPerp", ...], ["HlPerp", { fundingRate, nextFundingTime }] ] ], ... ]
+type VenueName = "HlPerp" | "BinPerp" | "BybitPerp" | string;
+interface VenueFundingData {
+    fundingRate: string; // "0.0000125"
+    nextFundingTime: number; // 1733958000000
 }
-
-/** Meta info for each asset */
-interface HyperliquidAssetMeta {
-    name: string;
-    szDecimals: number;
-}
+type VenueTuple = [VenueName, VenueFundingData];
+type AssetFundingTuple = [string, VenueTuple[]];
+type PredictedFundingsResponse = AssetFundingTuple[];
 
 /**
- * Fetch CURRENT predicted funding rates from Hyperliquid.
- * Uses POST /info with { type: "metaAndAssetCtxs" }.
- *
- * Why not fundingHistory?
- *   fundingHistory returns OLD settled rates, not the live predicted
- *   rate shown on the UI. metaAndAssetCtxs gives the real-time rate.
+ * Fetch PREDICTED funding rates from Hyperliquid.
+ * Uses POST /info with { type: "predictedFundings" }.
  */
 async function fetchHyperliquidRates(
     httpClient: { fetch: typeof fetch },
@@ -103,41 +90,37 @@ async function fetchHyperliquidRates(
     const response = await httpClient.fetch(config.hyperliquidApiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "metaAndAssetCtxs" }),
+        body: JSON.stringify({ type: "predictedFundings" }),
     });
 
-    // Response shape: [{ universe: AssetMeta[] }, AssetCtx[]]
-    const [meta, assetCtxs] = (await response.json()) as [
-        { universe: HyperliquidAssetMeta[] },
-        HyperliquidAssetCtx[]
-    ];
-
+    const data = (await response.json()) as PredictedFundingsResponse;
     const results: VenueFundingRate[] = [];
 
-    for (const coin of coins) {
-        // Find the index of the coin in the universe array
-        const idx = meta.universe.findIndex((a) => a.name === coin);
-        if (idx === -1) continue;
+    // Normalize requested symbols for case-insensitive comparison
+    const requestedCoins = new Set(coins.map(c => c.toUpperCase()));
 
-        const ctx = assetCtxs[idx];
-        const rawRate = parseFloat(ctx.funding);
+    for (const [assetSymbol, venues] of data) {
+        if (requestedCoins.has(assetSymbol.toUpperCase())) {
+            // Find Hyperliquid venue data
+            const hlVenue = venues.find(([venueName]) => venueName === 'HlPerp');
 
-        // Hyperliquid returns per-1h funding rate
-        // Annualize: rate × 24 hours/day × 365 days × 100 (to %)
-        const annualizedRate = rawRate * 24 * 365 * 100;
-        const rate8h = rawRate * 8;
+            if (hlVenue) {
+                const [, fundingData] = hlVenue;
+                const rawRate = parseFloat(fundingData.fundingRate);
 
-        console.log(`  [DEBUG] Hyperliquid ${coin}: raw=${ctx.funding}, 8hPct=${(rate8h * 100).toFixed(4)}%, annualized=${annualizedRate.toFixed(4)}%`);
+                // Hyperliquid returns per-1h funding rate
+                // Annualize: rate × 24 hours/day × 365 days × 100 (to %)
+                const annualizedRate = rawRate * 24 * 365 * 100;
+                // const rate8h = rawRate * 8; // kept for potential debugReference
 
-        results.push({
-            venue: "hyperliquid",
-            symbol: `${coin}USDT`,
-            fundingRate: annualizedRate,
-            fundingTime: Date.now(),
-        });
-
-        // Also log to console for visibility
-        // console.log(`  [DEBUG] Hyperliquid ${coin}: 8hPct=${(rawRate * 100).toFixed(4)}%`);
+                results.push({
+                    venue: "hyperliquid",
+                    symbol: `${assetSymbol}USDT`,
+                    fundingRate: annualizedRate,
+                    fundingTime: fundingData.nextFundingTime, // Use the predicted time
+                });
+            }
+        }
     }
 
     return results;
@@ -311,14 +294,14 @@ async function main() {
     while (true) {
         try {
             const startTime = Date.now();
-            console.log(`\n[${new Date().toLocaleTimeString()}] Fetching global funding rates...`);
+            console.log(`\n[${new Date().toLocaleTimeString()}] Fetching Hyperliquid rates...`);
 
             const rates = await fetchGlobalRates(httpClient);
 
-            console.log("  ━━━ Consensus Results (R_cex) ━━━");
-            console.log(`  BTC median rate:  ${rates.btc.medianRate.toFixed(4)}% APR`);
+            console.log("  ━━━ Hyperliquid Rates ━━━");
+            console.log(`  BTC rate (8h annualized):  ${rates.btc.medianRate.toFixed(4)}% APR`);
             // console.log(`    Sources: ${rates.btc.sources.map((s) => `${s.venue}(${s.fundingRate.toFixed(4)}%)`).join(", ")}`);
-            console.log(`  ETH median rate:  ${rates.eth.medianRate.toFixed(4)}% APR`);
+            console.log(`  ETH rate (8h annualized):  ${rates.eth.medianRate.toFixed(4)}% APR`);
             // console.log(`    Sources: ${rates.eth.sources.map((s) => `${s.venue}(${s.fundingRate.toFixed(4)}%)`).join(", ")}`);
 
             console.log("  ━━━ Data Persistence ━━━");
