@@ -11,6 +11,7 @@
     },
     "dependencies": {
         "@chainlink/cre-sdk": "latest",
+        "@google/generative-ai": "^0.24.1",
         "@types/node": "^25.2.3",
         "dotenv": "^17.3.1",
         "viem": "^2.46.1",

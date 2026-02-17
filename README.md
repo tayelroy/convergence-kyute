@@ -10,14 +10,14 @@ kYUte transforms passive crypto savings into intelligent, self-protecting assets
 
 ---
 
-## Features
+## 🚀 Features
 
-- **Yield Risk Pulse**: Real-time AI analysis of market volatility (0-100 Risk Score).
+- **Yield Risk Pulse**: Real-time **Gemini 2.0 Flash** (Exp) analysis of market volatility (0-100 Risk Score).
 - **Auto-Guard Agent**: An autonomous Chainlink CRE workflow that monitors your portfolio 24/7.
 - **Smart Hedging**: Automatically opens short Yield Unit (YU) positions on Boros when risk is critical.
 - **Consumer Dashboard**: Simple, visually rich interface to track savings and toggle protection.
 
-## Tech Stack
+## 🛠️ Tech Stack
 
 - **Orchestration**: Chainlink Runtime Environment (CRE)
 - **AI**: Google Gemini Pro (via CRE HTTP Capability)
@@ -25,7 +25,7 @@ kYUte transforms passive crypto savings into intelligent, self-protecting assets
 - **Contract**: Solidity (`StabilityVault.sol`)
 - **Frontend**: Next.js, Tailwind, Recharts
 
-## Installation
+## 📦 Installation
 
 1.  **Clone the repo:**
     ```bash
@@ -54,12 +54,12 @@ kYUte transforms passive crypto savings into intelligent, self-protecting assets
 ## 🏃‍♂️ Usage
 
 ### 1. Run the kYUte Agent (Backend)
-The CRE workflow monitors yields and executes hedges.
+The CRE workflow monitors yields, calls Gemini AI, and executes hedges via the Vault.
 ```bash
 # In project root
 npx tsx cre-workflow/main.ts
 ```
-*Output: You should see the agent connecting to Arbitrum, checking Boros rates, and logging AI risk scores.*
+*Output: You should see the agent connecting to Arbitrum, checking Boros rates, and logging real AI risk scores.*
 
 ### 2. Launch the Dashboard (Frontend)
 Track your savings and agent activity.
@@ -69,11 +69,19 @@ npm run dev
 ```
 Open [http://localhost:3000/dashboard](http://localhost:3000/dashboard).
 
+### 3. Deploy Contracts (Optional)
+To deploy your own Stability Vault on Arbitrum Sepolia:
+```bash
+forge script contracts/script/DeployStabilityVault.s.sol --rpc-url $RPC_URL --broadcast
+```
+
+> **Tip:** If you see `Gemini API 404` logs, ensure the **Google Generative Language API** is enabled in your Google Cloud Console project. The Agent will automatically fall back to mock data if the API is unavailable.
+
 ## 🧪 Testing & Verification
 
-- **Mock Mode**: The agent is configured to run with mock data if keys/contracts are missing, ensuring you can test the workflow logic immediately.
-- **Simulation**: Use `cre simulate` (roadmap) to test CRE triggers.
-- **Contracts**: Deploy `contracts/src/StabilityVault.sol` to Arbitrum Sepolia for full on-chain integration.
+- **Mock Mode**: The agent gracefully falls back to mock logic if keys/contracts are missing, ensuring instant demo capability.
+- **Real AI**: Provide a valid `GEMINI_API_KEY` to see actual generative risk assessments.
+- **EVM Integration**: Verified on Arbitrum Sepolia testnet.
 
 ---
 
