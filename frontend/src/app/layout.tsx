@@ -31,7 +31,7 @@ export default function RootLayout({
   return (
     <html lang="en" className="dark">
       <body
-        className={`${inter.variable} ${robotoMono.variable} font-sans antialiased bg-[#0a0a0f] text-neutral-100`}
+        className={`${inter.variable} ${robotoMono.variable} font-sans antialiased bg-[#0a0a0f] text-neutral-100 h-screen w-screen overflow-hidden`}
       >
         <Providers>
           {children}
