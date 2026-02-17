@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { fetchPredictedFundings, PredictedFunding } from "@/lib/hyperliquid";
-import { ArrowTrendingUpIcon, ArrowTrendingDownIcon, ClockIcon } from "@heroicons/react/24/outline";
+import { TrendingUp, TrendingDown, Clock } from "lucide-react";
 
 export function PredictedFundingWidget() {
     const [fundingData, setFundingData] = useState<PredictedFunding[]>([]);
@@ -80,8 +80,8 @@ export function PredictedFundingWidget() {
                             key={sym}
                             onClick={() => setSelectedSymbol(sym)}
                             className={`px-3 py-1 text-xs font-medium rounded-md transition-all duration-200 ${selectedSymbol === sym
-                                    ? 'bg-[#2a2a2a] text-white shadow-sm'
-                                    : 'text-gray-500 hover:text-gray-300'
+                                ? 'bg-[#2a2a2a] text-white shadow-sm'
+                                : 'text-gray-500 hover:text-gray-300'
                                 }`}
                         >
                             {sym}
@@ -102,7 +102,7 @@ export function PredictedFundingWidget() {
 
                 <div className="flex items-center gap-4 mt-3 text-xs text-gray-400 border-t border-[#1a1a1a] pt-3">
                     <div className="flex items-center gap-1.5" title={nextFundingDate.toLocaleString()}>
-                        <ClockIcon className="w-3.5 h-3.5" />
+                        <Clock className="w-3.5 h-3.5" />
                         <span>
                             {hoursUntil}h {minutesUntil}m until funding
                         </span>
@@ -113,8 +113,8 @@ export function PredictedFundingWidget() {
                 {/* Strategy Hooks / Warnings */}
                 {(isHighPositive || isHighNegative) && (
                     <div className={`mt-3 p-2 rounded border ${isHighPositive
-                            ? 'bg-orange-500/10 border-orange-500/20 text-orange-400'
-                            : 'bg-blue-500/10 border-blue-500/20 text-blue-400'
+                        ? 'bg-orange-500/10 border-orange-500/20 text-orange-400'
+                        : 'bg-blue-500/10 border-blue-500/20 text-blue-400'
                         } text-xs leading-relaxed animate-in fade-in slide-in-from-bottom-2`}>
                         {isHighPositive && "Funding is highly positive. Consider reducing long exposure."}
                         {isHighNegative && "Funding is highly negative. Consider reducing short exposure."}
