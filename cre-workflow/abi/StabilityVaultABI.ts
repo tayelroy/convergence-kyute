@@ -10,7 +10,10 @@ export const StabilityVaultABI = [
     name: "openShortYU",
     type: "function",
     stateMutability: "nonpayable",
-    inputs: [{ name: "amount", type: "uint256" }],
+    inputs: [
+      { name: "market", type: "address" },
+      { name: "amount", type: "uint256" },
+    ],
     outputs: [],
   },
 ] as const;
