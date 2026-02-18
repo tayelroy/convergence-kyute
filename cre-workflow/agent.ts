@@ -1,10 +1,17 @@
 
-import { createWalletClient, http, publicActions, type WalletClient, type PublicClient } from "viem";
+import { createWalletClient, http, publicActions, parseEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrumSepolia } from "viem/chains";
 import { fetchBorosImpliedApr } from "./boros.js";
 import { fetchHyperliquidFundingRate } from "./hyperliquid.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+
+// Inferred client type for viem (WalletClient + PublicActions combined)
+const _buildClient = (acct: ReturnType<typeof privateKeyToAccount>, rpcUrl: string) =>
+    createWalletClient({ account: acct, chain: arbitrumSepolia, transport: http(rpcUrl) })
+        .extend(publicActions);
+
+type KyuteClient = ReturnType<typeof _buildClient>;
 
 // Agent Configuration Interface
 interface AgentConfig {
@@ -15,8 +22,7 @@ interface AgentConfig {
 }
 
 export class KyuteAgent {
-    // Use 'any' to avoid TS conflict between WalletClient (has account) and PublicClient (account: undefined)
-    private wallet: any;
+    private client: KyuteClient;
     private geminiKey: string;
     private vaultAddress: string;
     private genAI: GoogleGenerativeAI | null = null;
@@ -29,7 +35,7 @@ export class KyuteAgent {
 
     constructor(config: AgentConfig) {
         const account = privateKeyToAccount(config.privateKey as `0x${string}`);
-        this.wallet = createWalletClient({
+        this.client = createWalletClient({
             account,
             chain: arbitrumSepolia,
             transport: http(config.rpcUrl)
@@ -48,7 +54,7 @@ export class KyuteAgent {
 
     async healthCheck() {
         console.log("EVM Connection: Connected to Arbitrum Sepolia");
-        const chainId = await this.wallet.getChainId();
+        const chainId = await this.client.getChainId();
         console.log(`   Chain ID: ${chainId}`);
 
         if (!this.genAI) {
