@@ -1,7 +1,7 @@
 
 import { createWalletClient, http, publicActions, parseEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { arbitrumSepolia } from "viem/chains";
+import { arbitrum } from "viem/chains";
 import { fetchBorosImpliedApr } from "./boros.js";
 import { fetchHyperliquidFundingRate } from "./hyperliquid.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
@@ -9,7 +9,7 @@ import { StabilityVaultABI } from "./abi/StabilityVaultABI.js";
 
 // Inferred client type for viem (WalletClient + PublicActions combined)
 const _buildClient = (acct: ReturnType<typeof privateKeyToAccount>, rpcUrl: string) =>
-    createWalletClient({ account: acct, chain: arbitrumSepolia, transport: http(rpcUrl) })
+    createWalletClient({ account: acct, chain: arbitrum, transport: http(rpcUrl) })
         .extend(publicActions);
 
 type KyuteClient = ReturnType<typeof _buildClient>;
@@ -38,7 +38,7 @@ export class KyuteAgent {
         const account = privateKeyToAccount(config.privateKey as `0x${string}`);
         this.client = createWalletClient({
             account,
-            chain: arbitrumSepolia,
+            chain: arbitrum,
             transport: http(config.rpcUrl)
         }).extend(publicActions);
 
@@ -54,7 +54,7 @@ export class KyuteAgent {
     }
 
     async healthCheck() {
-        console.log("EVM Connection: Connected to Arbitrum Sepolia");
+        console.log("EVM Connection: Connected to Arbitrum One (fork)");
         const chainId = await this.client.getChainId();
         console.log(`   Chain ID: ${chainId}`);
 
@@ -219,16 +219,18 @@ export class KyuteAgent {
 
     async executeHedge(apr: number) {
         const hedgeSizeWei = parseEther("0.5");
+        const BOROS_ETH_MARKET = "0x8db1397beb16a368711743bc42b69904e4e82122";
         console.log(`[TX] Submitting Hedge to StabilityVault...`);
         console.log(`   Contract: ${this.vaultAddress}`);
-        console.log(`   Function: openShortYU(${hedgeSizeWei} wei = 0.5 ETH)`);
+        console.log(`   Market: ${BOROS_ETH_MARKET}`);
+        console.log(`   Function: openShortYU(${BOROS_ETH_MARKET}, ${hedgeSizeWei} wei = 0.5 ETH)`);
 
         try {
             const txHash = await this.client.writeContract({
                 address: this.vaultAddress as `0x${string}`,
                 abi: StabilityVaultABI,
                 functionName: "openShortYU",
-                args: [hedgeSizeWei],
+                args: [BOROS_ETH_MARKET, hedgeSizeWei],
             });
             console.log(`[TX] Broadcast: ${txHash}`);
 

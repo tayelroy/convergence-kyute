@@ -1,28 +1,59 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.19;
 
-/**
- * @title StabilityVault
- * @dev A simplified vault for kYUte users to deposit savings (e.g. USDe/USDC).
- *      Allows an authorized "Agent" (Chainlink CRE) to execute hedging transactions
- *      on behalf of users to protect yield.
- */
-contract StabilityVault {
-    // --- State Variables ---
-    mapping(address => uint256) public balances; // User ETH/Native balance
-    address public agent; // The CRE Agent address authorized to hedge
-    address public owner;
+import "@openzeppelin/contracts/access/Ownable.sol";
 
-    // --- Events ---
+// --- 1. Real Interfaces for Pendle/Boros ---
+interface IPendleRouter {
+    struct ApproxParams {
+        uint256 guessMin;
+        uint256 guessMax;
+        uint256 guessOffchain;
+        uint256 maxIteration;
+        uint256 eps;
+    }
+
+    struct TokenInput {
+        address tokenIn;
+        uint256 netTokenIn;
+        address tokenMintSy;
+        address pendleSwap;
+        bytes swapData;
+    }
+
+    struct LimitOrderData {
+        address limitRouter;
+        uint256 epsSkipMarket;
+        uint256 normalFills;
+        uint256 flashFills;
+        bytes optData;
+    }
+
+    // The function to "Short Yield" (Buy PT = Fix Yield)
+    function swapExactTokenForPt(
+        address receiver,
+        address market,
+        uint256 minPtOut,
+        ApproxParams calldata guessPtOut,
+        TokenInput calldata input,
+        LimitOrderData calldata limit
+    ) external payable returns (uint256 netPtOut, uint256 netSyFee, uint256 netSyInterm);
+}
+
+contract StabilityVault is Ownable {
+    // --- Configuration (Arbitrum One) ---
+    // The Official Pendle Router V3
+    address public constant PENDLE_ROUTER = 0x888888888889758F76e7103c6CbF23ABbF58F946;
+
+    // State
+    mapping(address => uint256) public balances;
+    address public agent;
+
     event Deposit(address indexed user, uint256 amount);
-    event Withdrawal(address indexed user, uint256 amount);
-    event AgentUpdated(address indexed oldAgent, address indexed newAgent);
-    event HedgeExecuted(uint256 amount, string reason);
+    event HedgeExecuted(uint256 amountIn, uint256 ptReceived, address market);
 
-    // --- Modifiers ---
-    modifier onlyOwner() {
-        require(msg.sender == owner, "Only Owner");
-        _;
+    constructor(address _agent) Ownable(msg.sender) {
+        agent = _agent;
     }
 
     modifier onlyAgent() {
@@ -30,63 +61,45 @@ contract StabilityVault {
         _;
     }
 
-    constructor(address _agent) {
-        owner = msg.sender;
-        agent = _agent;
-    }
-
     // --- User Actions ---
-
-    /**
-     * @notice Deposit native currency (ETH) into the vault.
-     * @dev Keeps track of user balance for dashboard display.
-     */
     function deposit() external payable {
-        require(msg.value > 0, "Deposit must be > 0");
         balances[msg.sender] += msg.value;
         emit Deposit(msg.sender, msg.value);
     }
 
+    // --- The "Legit" Hedge Function ---
     /**
-     * @notice Withdraw native currency.
+     * @notice Converts Vault Capital -> Fixed Yield PT (Shorting Floating Rate)
+     * @param market The Boros/Pendle Market address (e.g., PT-eETH-Dec26)
+     * @param amount The amount of ETH to deploy
      */
-    function withdraw(uint256 amount) external {
-        require(balances[msg.sender] >= amount, "Insufficient balance");
-        balances[msg.sender] -= amount;
+    function openShortYU(address market, uint256 amount) external onlyAgent {
+        require(address(this).balance >= amount, "Insufficient Funds");
 
-        (bool success, ) = payable(msg.sender).call{value: amount}("");
-        require(success, "Withdrawal failed");
+        // 1. Setup Swap Params (ETH -> PT)
+        IPendleRouter.ApproxParams memory emptyApprox = IPendleRouter.ApproxParams(0, 0, 0, 0, 0);
+        IPendleRouter.LimitOrderData memory emptyLimit = IPendleRouter.LimitOrderData(address(0), 0, 0, 0, "");
 
-        emit Withdrawal(msg.sender, amount);
-    }
+        IPendleRouter.TokenInput memory input = IPendleRouter.TokenInput({
+            tokenIn: address(0), // ETH
+            netTokenIn: amount,
+            tokenMintSy: address(0),
+            pendleSwap: address(0),
+            swapData: ""
+        });
 
-    // --- Agent Actions (CRE) ---
-
-    /**
-     * @notice Execute a hedge transaction (Draft).
-     * @dev In a real implementation, this would interact with Boros Router
-     *      to open a Short YU position using the vault's capital.
-     *      For hackathon demo, we emit an event to simulate the action.
-     * @param amount Amount of capital to deploy into the hedge.
-     */
-    function openShortYU(uint256 amount) external onlyAgent {
-        // Validation (Mock)
-        require(
-            address(this).balance >= amount,
-            "Vault insufficient funds for hedge"
+        // 2. Execute Real Swap on Pendle Router
+        (uint256 netPtOut, , ) = IPendleRouter(PENDLE_ROUTER).swapExactTokenForPt{value: amount}(
+            address(this),
+            market,
+            0,             // Slippage set to 0 for demo simplicity
+            emptyApprox,
+            input,
+            emptyLimit
         );
 
-        // Interaction (Mock)
-        // In prod: BorosRouter.swap(...)
-
-        emit HedgeExecuted(amount, "High Volatility Projected by AI");
+        emit HedgeExecuted(amount, netPtOut, market);
     }
 
-    // --- Admin ---
-
-    function setAgent(address _agent) external onlyOwner {
-        address oldAgent = agent;
-        agent = _agent;
-        emit AgentUpdated(oldAgent, _agent);
-    }
+    receive() external payable {}
 }
