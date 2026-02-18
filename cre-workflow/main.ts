@@ -16,12 +16,19 @@ async function main() {
         throw new Error("Missing PRIVATE_KEY or RPC_URL in .env");
     }
 
+    if (!process.env.STABILITY_VAULT_ADDRESS) {
+        throw new Error(
+            "Missing STABILITY_VAULT_ADDRESS in .env. Deploy StabilityVault first:\n" +
+            "  cd contracts && forge script script/DeployStabilityVault.s.sol:DeployStabilityVault --rpc-url arbitrum_sepolia --broadcast"
+        );
+    }
+
     // Initialize
     const agent = new KyuteAgent({
         rpcUrl: process.env.RPC_URL,
         privateKey: process.env.PRIVATE_KEY,
         geminiKey: process.env.GEMINI_API_KEY || "",
-        vaultAddress: "0xMockVaultAddress" // Placeholder for now
+        vaultAddress: process.env.STABILITY_VAULT_ADDRESS
     });
 
     // Validating Connections
