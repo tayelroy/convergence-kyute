@@ -5,6 +5,7 @@ import { arbitrumSepolia } from "viem/chains";
 import { fetchBorosImpliedApr } from "./boros.js";
 import { fetchHyperliquidFundingRate } from "./hyperliquid.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
+import { StabilityVaultABI } from "./abi/StabilityVaultABI.js";
 
 // Inferred client type for viem (WalletClient + PublicActions combined)
 const _buildClient = (acct: ReturnType<typeof privateKeyToAccount>, rpcUrl: string) =>
@@ -98,8 +99,19 @@ export class KyuteAgent {
             console.log(`Spread Annualized (Arb Opportunity): ${(spread * 100).toFixed(2)}%`);
 
             // 2. Fetch User Portfolio (Read Capability)
-            const userBalance = 12500; // TODO: Fetch from vault
-            console.log(`Monitored Savings: $${userBalance.toLocaleString()} USDC`);
+            let userBalance = 0;
+            try {
+                const rawBalance = await this.client.readContract({
+                    address: this.vaultAddress as `0x${string}`,
+                    abi: StabilityVaultABI,
+                    functionName: "balances",
+                    args: [this.client.account.address],
+                });
+                userBalance = Number(rawBalance) / 1e18; // wei → ETH
+            } catch (balErr) {
+                console.warn("Could not fetch vault balance, defaulting to 0:", balErr);
+            }
+            console.log(`Monitored Vault ETH: ${userBalance.toFixed(4)} ETH`);
 
             // 3. AI Prediction (AI Capability)
             const prediction = await this.predictYieldRisk(borosApr, hlApr);
