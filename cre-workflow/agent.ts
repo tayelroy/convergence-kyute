@@ -22,6 +22,11 @@ export class KyuteAgent {
     private genAI: GoogleGenerativeAI | null = null;
     private model: any = null;
 
+
+
+    // State for volatility analysis (last 24 data points)
+    private historicalSpreads: number[] = [];
+
     constructor(config: AgentConfig) {
         const account = privateKeyToAccount(config.privateKey as `0x${string}`);
         this.wallet = createWalletClient({
@@ -63,8 +68,7 @@ export class KyuteAgent {
             let hlApr = 0;
 
             try {
-                // Boros (Arbitrum)
-                const marketAddress = "0x8db1397beb16a368711743bc42b69904e4e82122";
+                const marketAddress = "0x8db1397beb16a368711743bc42b69904e4e82122"; // ETH-USDC Market on Boros
                 borosApr = await fetchBorosImpliedApr(marketAddress);
             } catch (e) {
                 console.warn("Boros Fetch Failed, defaulting to 15.5% (Simulation)");
@@ -72,10 +76,9 @@ export class KyuteAgent {
             }
 
             try {
-                // Hyperliquid (Arbitrum L3)
                 // fetchHyperliquidFundingRate returns Annualized Funding Rate
-                const rawHl = await fetchHyperliquidFundingRate("ETH");
-                hlApr = rawHl; // Already annualized in helper
+                const hlFundingRate = await fetchHyperliquidFundingRate("ETH");
+                hlApr = hlFundingRate;
             } catch (e) {
                 console.warn("Hyperliquid Fetch Failed, defaulting to Boros + 6%");
                 hlApr = borosApr + 0.06;
@@ -83,34 +86,56 @@ export class KyuteAgent {
 
             const spread = hlApr - borosApr;
 
-            console.log(`📊 Yield Comparison:`);
-            console.log(`   Boros APR: ${(borosApr * 100).toFixed(2)}%`);
-            console.log(`   Hyperliquid Funding (Annualized): ${(hlApr * 100).toFixed(2)}%`);
-            console.log(`   Spread (Arb Opportunity): ${(spread * 100).toFixed(2)}%`);
+            console.log(`Yield Comparison:`);
+            console.log(`Boros APR: ${(borosApr * 100).toFixed(2)}%`);
+            console.log(`Hyperliquid Funding (Annualized): ${(hlApr * 100).toFixed(2)}%`);
+            console.log(`Spread Annualized (Arb Opportunity): ${(spread * 100).toFixed(2)}%`);
 
             // 2. Fetch User Portfolio (Read Capability)
-            const userBalance = 12500;
-            console.log(`💰 Monitored Savings: $${userBalance.toLocaleString()} USDe`);
+            const userBalance = 12500; // TODO: Fetch from vault
+            console.log(`Monitored Savings: $${userBalance.toLocaleString()} USDC`);
 
             // 3. AI Prediction (AI Capability)
-            const riskScore = await this.predictYieldRisk(borosApr, hlApr);
-            const riskLevel = riskScore > 70 ? "CRITICAL" : riskScore > 50 ? "HIGH" : "LOW";
+            const prediction = await this.predictYieldRisk(borosApr, hlApr);
+            const riskScore = prediction.riskScore;
+            // Push current spread to history (maintain rolling window of 24)
+            if (this.historicalSpreads.length >= 24) this.historicalSpreads.shift();
+            this.historicalSpreads.push(spread);
+
+            const riskLevel = riskScore > 90 ? "CRITICAL" : riskScore > 70 ? "HIGH" : "LOW";
             console.log(`AI Volatility Forecast: ${riskScore}/100 (${riskLevel})`);
+            console.log(`   AI Reason: ${prediction.reason}`);
 
             // 4. Decision & Action (Write Capability)
-            // Logic: Hedge if Spread > 5% (reversion likely) AND AI agrees (Risk > 70)
-            if (spread > 0.05 && riskScore > 70) {
-                console.warn("CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
-                await this.executeHedge(borosApr);
-            } else {
-                console.log("Yield Stable. No hedge needed.");
+            // Improved Logic: Composite score = riskScore + confidence boost + (spread * volFactor)
+            try {
+                const volFactor = this.calculateVolatilityFactor(this.historicalSpreads);
+                const confidenceBoost = this.getConfidenceBoost(prediction.reason);
+                // Spread is decimal (e.g. 0.05), so we scale by 100 to get percentage points (e.g. 5) 
+                // Then multiply by volFactor. Example: 5 * 1.5 = 7.5 added to score? 
+                // User logic: (spread * volFactor * 100). If spread is 0.08, term is 8 * 1.5 = 12.
+                const spreadTerm = spread * 100 * volFactor;
+                const compositeScore = riskScore + confidenceBoost + spreadTerm;
+
+                console.log(`   Volatility Factor: ${volFactor.toFixed(2)}x`);
+                console.log(`   Confidence Boost: +${confidenceBoost}`);
+                console.log(`   Composite Score: ${compositeScore.toFixed(2)}`);
+
+                if (compositeScore > 100) {
+                    console.warn("CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
+                    await this.executeHedge(borosApr);
+                } else {
+                    console.log("Yield Stable. No hedge needed.");
+                }
+            } catch (error) {
+                console.error("Decision Logic Error:", error);
             }
         } catch (error) {
             console.error("Agent Workflow Error:", error);
         }
     }
 
-    async predictYieldRisk(borosApr: number, hlApr: number): Promise<number> {
+    async predictYieldRisk(borosApr: number, hlApr: number): Promise<{ riskScore: number, reason: string }> {
         // Real AI Inference
         if (this.model) {
             try {
@@ -139,8 +164,11 @@ export class KyuteAgent {
                 const jsonText = text.replace(/```json/g, "").replace(/```/g, "").trim();
                 const data = JSON.parse(jsonText);
 
-                console.log(`   AI Reason: ${data.reason}`);
-                return Math.min(Math.max(data.riskScore, 0), 100);
+                // console.log(`   AI Reason: ${data.reason}`);
+                return {
+                    riskScore: Math.min(Math.max(data.riskScore, 0), 100),
+                    reason: data.reason
+                };
             } catch (err: any) {
                 console.warn("AI Error (falling back to mock):", err.message);
             }
@@ -150,7 +178,25 @@ export class KyuteAgent {
         // High spread = High risk
         const spreadWeight = (hlApr - borosApr) * 500; // 0.05 * 500 = 25
         const baseRisk = Math.min(Math.floor(borosApr * 500), 50);
-        return Math.min(baseRisk + spreadWeight + 20, 100);
+        return {
+            riskScore: Math.min(baseRisk + spreadWeight + 20, 100),
+            reason: "Simulated fallback risk assessment due to API unavailability."
+        };
+    }
+
+    // Helper: Calculate volatility factor (std dev normalized)
+    private calculateVolatilityFactor(historicalSpreads: number[]): number {
+        if (historicalSpreads.length < 2) return 1; // Default if insufficient data
+        const mean = historicalSpreads.reduce((a, b) => a + b, 0) / historicalSpreads.length;
+        const variance = historicalSpreads.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / historicalSpreads.length;
+        const stdDev = Math.sqrt(variance);
+        return 1 + (stdDev / 0.05); // Normalize to base spread threshold (5%); higher volatility increases factor
+    }
+
+    // Parse AI reason for confidence boost (simple keyword scoring)
+    private getConfidenceBoost(reason: string): number {
+        const keywords = ['extreme', 'high', 'likely', 'significant', 'crash', 'collapse'];
+        return keywords.some(word => reason ? reason.toLowerCase().includes(word) : false) ? 20 : 0; // +20 if confident language
     }
 
     async executeHedge(apr: number) {
