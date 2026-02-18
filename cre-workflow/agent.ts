@@ -14,7 +14,8 @@ interface AgentConfig {
 }
 
 export class KyuteAgent {
-    private wallet: WalletClient & PublicClient;
+    // Use 'any' to avoid TS conflict between WalletClient (has account) and PublicClient (account: undefined)
+    private wallet: any;
     private geminiKey: string;
     private vaultAddress: string;
     private genAI: GoogleGenerativeAI | null = null;
@@ -22,7 +23,6 @@ export class KyuteAgent {
 
     constructor(config: AgentConfig) {
         const account = privateKeyToAccount(config.privateKey as `0x${string}`);
-        // @ts-ignore - Local type mismatch with extend
         this.wallet = createWalletClient({
             account,
             chain: arbitrumSepolia,
@@ -35,37 +35,35 @@ export class KyuteAgent {
         // Initialize Gemini AI if key is present
         if (this.geminiKey && this.geminiKey !== "mock-key-12345") {
             this.genAI = new GoogleGenerativeAI(this.geminiKey);
-            // Updated to Gemini 2.0 Flash per user request (assuming "3" was typo or next gen)
-            this.model = this.genAI.getGenerativeModel({ model: "gemini-2.0-flash-exp" });
+            const modelName = "gemini-3-flash-preview";
+            this.model = this.genAI.getGenerativeModel({ model: modelName });
         }
     }
 
     async healthCheck() {
-        console.log("✅ EVM Connection: Connected to Arbitrum Sepolia");
+        console.log("EVM Connection: Connected to Arbitrum Sepolia");
         const chainId = await this.wallet.getChainId();
         console.log(`   Chain ID: ${chainId}`);
 
         if (!this.genAI) {
-            console.warn("⚠️ AI Capability: No valid GEMINI_API_KEY found. Using Mock Fallback.");
+            console.warn("AI Capability: No valid GEMINI_API_KEY found.");
         } else {
-            console.log("✅ AI Capability: Gemini 2.0 Flash (Exp) Model Loaded");
+            console.log(`AI Capability: ${this.model.model}`);
         }
     }
 
     async executeWorkflow() {
         const timestamp = new Date().toLocaleTimeString();
-        console.log(`\n--- 🛡️ kYUte Workflow [${timestamp}] ---`);
+        console.log(`\n--- kyute Workflow [${timestamp}] ---`);
 
         try {
             // 1. Fetch Yield Data (Oracle Capability)
             let currentApr = 0;
             try {
-                // Boros (Arbitrum) - Using WBTC/USDC market as proxy or hardcoded for demo
-                // Ideally this fetches from Boros contract or indexed data
-                const marketAddress = "0xcaf0d78c581ee8a03b9dd974f2ebfb3026961969";
+                const marketAddress = "0x8db1397beb16a368711743bc42b69904e4e82122"; // ETH/USDC Boros Market
                 currentApr = await fetchBorosImpliedApr(marketAddress);
             } catch (e) {
-                console.warn("⚠️ Boros Fetch Failed, defaulting to 15.5% (Simulation)");
+                console.warn("Boros Fetch Failed, defaulting to 15.5% (Simulation)");
                 currentApr = 0.155;
             }
 
@@ -75,22 +73,22 @@ export class KyuteAgent {
             // In a real scenario, we read `balances[user]` from StabilityVault
             // For now, we mock a user balance to simulate value at risk
             const userBalance = 12500; // $12,500 USDe
-            console.log(`💰 Monitored Savings: $${userBalance.toLocaleString()} USDe`);
+            console.log(`Monitored Savings: $${userBalance.toLocaleString()} USDe`);
 
             // 3. AI Prediction (AI Capability)
             const riskScore = await this.predictYieldRisk(currentApr);
             const riskLevel = riskScore > 75 ? "CRITICAL" : riskScore > 50 ? "HIGH" : "LOW";
-            console.log(`🤖 AI Volatility Forecast: ${riskScore}/100 (${riskLevel})`);
+            console.log(`AI Volatility Forecast: ${riskScore}/100 (${riskLevel})`);
 
             // 4. Decision & Action (Write Capability)
             if (riskScore > 75) {
-                console.warn("⚠️ CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
+                console.warn("CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
                 await this.executeHedge(currentApr);
             } else {
-                console.log("✅ Yield Stable. No hedge needed.");
+                console.log("Yield Stable. No hedge needed.");
             }
         } catch (error) {
-            console.error("❌ Agent Workflow Error:", error);
+            console.error("Agent Workflow Error:", error);
         }
     }
 
