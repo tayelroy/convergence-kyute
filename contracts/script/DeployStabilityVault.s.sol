@@ -6,10 +6,9 @@ import "../src/StabilityVault.sol";
 
 contract DeployStabilityVault is Script {
     function run() external {
-        uint256 deployerPrivateKey = vm.envUint("PRIVATE_KEY");
-        address agentAddress = vm.envAddress("AGENT_ADDRESS"); // Set this in .env or pass via CLI
+        address agentAddress = vm.envAddress("AGENT_ADDRESS"); // Set as the agent in the vault
 
-        vm.startBroadcast(deployerPrivateKey);
+        vm.startBroadcast();
 
         StabilityVault vault = new StabilityVault(agentAddress);
         console.log("StabilityVault deployed at:", address(vault));
