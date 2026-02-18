@@ -41,7 +41,7 @@ export class KyuteAgent {
         // Initialize Gemini AI if key is present
         if (this.geminiKey && this.geminiKey !== "mock-key-12345") {
             this.genAI = new GoogleGenerativeAI(this.geminiKey);
-            const modelName = "gemini-3-flash-preview";
+            const modelName = "gemini-2.0-flash";
             this.model = this.genAI.getGenerativeModel({ model: modelName });
         }
     }
