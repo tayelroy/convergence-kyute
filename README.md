@@ -1,131 +1,150 @@
-# kYUte 🛡️
+# PROJECT NAME: kYUte
 
-AI-Driven Yield Guardian for Personal Crypto Savings
+**AI-Driven Yield Guardian for Personal Crypto Savings**
 
-> Convergence Hackathon 2025 Submission  
-> Tracks: CRE & AI • Risk & Compliance • DeFi & Tokenization
+> **Convergence Hackathon 2025 Submission**
+> **Tracks:** DeFi & Capital Markets • Cross-Chain (CCIP) • AI Agents
 
-kYUte transforms passive crypto savings into intelligent, self-protecting assets. By combining Chainlink CRE automation with Google Gemini AI, kYUte monitors your yield-bearing positions (e.g., USDe, ATOM) and automatically hedges against funding rate volatility using Pendle Boros.
+kYUte transforms passive crypto savings into intelligent, self-protecting assets. By combining **Chainlink CRE** automation with **Google Gemini 3.0 Flash**, kYUte monitors your yield-bearing positions and automatically hedges against funding rate crashes using **Pendle Boros** (Yield Trading Protocol).
 
 ---
 
-## 🚀 Features
+## Key Innovation: Mainnet-Forked Execution
 
-- Yield Risk Pulse: Real-time Gemini 3.0 Flash analysis of market volatility (0–100 Risk Score).
-- Cross-Chain Oracle Intelligence: Compares Hyperliquid funding rates with Boros APRs to detect arbitrage-driven crash risks.
-- Auto-Guard Agent: An autonomous Chainlink CRE workflow that monitors your portfolio on a 30s heartbeat.
-- Smart Hedging: Automatically opens short Yield Unit (YU) positions on Boros when risk is critical.
-- Threshold-Gated AI Calls: The agent only invokes Gemini when the spread exceeds a configurable threshold (default 8% = 800 bps), passing historical spreads to the model for trend-aware decisions.
-- Consumer Dashboard: Simple, visually rich interface to track savings and toggle protection.
+Unlike typical hackathon projects that rely on mock contracts, **kYUte interacts with the real Boros Protocol on Arbitrum One.**
 
-## 🛠️ Tech Stack
+Because Boros (an institutional-grade Order Book for rates) is not deployed on Testnets, we utilize a **Mainnet Forking Architecture** (via Anvil) to demonstrate live, production-ready hedging without risking real capital.
 
-- Orchestration: Chainlink Runtime Environment (CRE)
-- AI: Google Gemini 3.0 Flash
-- DeFi: Pendle Boros (Arbitrum Sepolia)
-- Contract: Solidity (`StabilityVault.sol`)
-- Backend: TypeScript + Bun
-- Frontend: Next.js, Tailwind, Recharts
+## Features
 
-## 📦 Installation
+- **Yield Risk Pulse:** Real-time Gemini 3.0 analysis of market volatility (0–100 Risk Score).
+- **Boros Integration:** Direct interaction with the **Boros Router (Order Book)** to short Yield Units (YU) and lock in fixed rates.
+- **Auto-Guard Agent:** An autonomous **Chainlink CRE** workflow that monitors your portfolio on a 30s heartbeat.
+- **Mainnet Simulation:** A robust local environment that forks Arbitrum One state, allowing the agent to trade against real market liquidity and pricing.
+- **Threshold-Gated AI:** The agent only invokes Gemini when the spread exceeds a configurable threshold (default 8% = 800 bps) to optimize costs.
 
-1) Clone the repo:
+---
+
+## Tech Stack
+
+- **Orchestration:** Chainlink Runtime Environment (CRE)
+- **AI Model:** Google Gemini 3.0 Flash
+- **DeFi Protocol:** Pendle Boros (Arbitrum One)
+- **Smart Contract:** Solidity (`StabilityVault.sol` - Boros Compatible)
+- **Simulation:** Foundry / Anvil (Mainnet Forking)
+- **Backend:** TypeScript + Bun
+- **Frontend:** Next.js, Tailwind, Recharts
+
+---
+
+## Installation & Setup
+
+### 1. Clone the Repo
 ```bash
-git clone https://github.com/tayelroy/convergence-kyute
+git clone [https://github.com/your-username/convergence-kyute.git](https://github.com/your-username/convergence-kyute.git)
 cd convergence-kyute
+
 ```
 
-2) Install dependencies:
+### 2. Install Dependencies
+
 ```bash
-# Backend / CRE workflow
-cd cre-workflow
+# Install root dependencies
 bun install
 
-# Frontend (if applicable)
-# cd frontend && npm install
+# Install workflow dependencies
+cd cre-workflow && bun install
+
 ```
 
-3) Configure environment (root `.env`):
+### 3. Configure Environment
+
+Create a `.env` file in the root directory:
+
 ```env
-# EVM
-RPC_URL=http://127.0.0.1:8545               # Anvil (or your target RPC)
-PRIVATE_KEY=0x...                           # Agent key (Anvil acct #1 in demo)
-STABILITY_VAULT_ADDRESS=0x...               # Deployed StabilityVault address
+# AI Configuration
+GEMINI_API_KEY="your_google_api_key"
+AI_TRIGGER_SPREAD_BPS=800
 
-# AI
-GEMINI_API_KEY=your_gemini_key_here
-AI_TRIGGER_SPREAD_BPS=800                   # 8% trigger (set to 500 for 5%)
+# Blockchain (Local Fork)
+RPC_URL="[http://127.0.0.1:8545](http://127.0.0.1:8545)"
+PRIVATE_KEY="your_anvil_private_key"
 
-# Optional cooldown (if you enable it)
-# AI_MIN_INTERVAL_MS=60000
-```
-
-> Tip: In local demo, use `scripts/start_demo.sh` to fork Arbitrum with Anvil and deploy the `StabilityVault`. It prints the vault address and the agent account.
-
-## 🏃‍♂️ Usage
-
-### 1) Run the kYUte Agent (Backend)
-The CRE workflow monitors yields, optionally calls Gemini AI (gated by spread threshold), and can execute hedges via the Vault.
-```bash
-cd cre-workflow
-bun run dev
-```
-
-Agent behavior:
-1. Monitor: Fetch Boros APR (Arbitrum) & Hyperliquid funding (annualized).
-2. Gate AI: If spread ≥ `AI_TRIGGER_SPREAD_BPS`, call Gemini 3.0 Flash with recent spread history.
-3. Decide: Compute a composite score using AI risk, confidence, and volatility factor from historical spreads.
-4. Execute: If score > 100, call `openShortYU` on `StabilityVault`.
-
-### 2) Deposit into the Vault (Anvil demo)
-Use the payable `deposit()` so the per-user mapping and contract balance both reflect funds:
-```bash
-cast send <VAULT_ADDRESS> "deposit()" \
-  --value 0.5ether \
-  --rpc-url http://127.0.0.1:8545 \
-  --private-key <ANVIL_AGENT_PRIVATE_KEY>
-```
-
-Verify:
-```bash
-cast balance <VAULT_ADDRESS> --rpc-url http://127.0.0.1:8545
-cast call <VAULT_ADDRESS> "balances(address)" <AGENT_ADDRESS> --rpc-url http://127.0.0.1:8545
-```
-
-## 🧠 Threshold-Gated AI (What’s New)
-
-- The agent runs every 30s, but Gemini is only called when the spread exceeds a configurable threshold (`AI_TRIGGER_SPREAD_BPS`, default 800 bps = 8%).
-- The prompt includes a rolling window of historical spreads so Gemini evaluates both level and trend.
-- If the spread remains above the threshold for multiple cycles, you can optionally enable a cooldown (`AI_MIN_INTERVAL_MS`) to avoid repeated calls.
-
-### Sample Output
-
-The following is a real agent log with a 5% (500 bps) demo threshold. Your default can be 8% (800 bps) by setting `AI_TRIGGER_SPREAD_BPS=800` in `.env`.
+# Boros Configuration (Arbitrum One Mainnet Addresses)
+BOROS_ROUTER_ADDRESS="0x8080808080daB95eFED788a9214e400ba552DEf6"
+BOROS_COLLATERAL_ADDRESS="0x82af49447d8a07e3bd95bd0d56f35241523fbab1" # WETH (Must be lowercase)
+BOROS_DEPOSIT_AMOUNT_ETH=0.5
 
 ```
---- kyute Workflow [9:45:05 PM] ---
-Yield Comparison:
-Boros APR: 4.95%
-Hyperliquid Funding (Annualized): 10.70%
-Spread Annualized (Arb Opportunity): 5.75%
-Spread (bps): 575 bps
-Monitored Vault ETH: 1.0000 ETH
-[AI] spreadBps=575 threshold=500
-[AI] Triggered on threshold cross. spread=575 bps
-AI Volatility Forecast: 22/100 (LOW)
-   AI Reason: The current spread of 5.75% is at the bottom of the historical 5-11% range and well below the 8% threshold that triggers aggressive arbitrage pressure on Boros yields.
-   Volatility Factor: 1.00x
-   Confidence Boost: +0
-   Composite Score: 27.75
-Yield Stable. No hedge needed.
-```
-
-## 🧪 Testing & Verification
-
-- Mock Mode: The agent falls back to mock logic if AI keys are missing or unreachable.
-- Real AI: Provide a valid `GEMINI_API_KEY` to see actual generative risk assessments from Gemini 3.0 Flash.
-- EVM Integration: Verified on Arbitrum Sepolia and local Anvil fork.
 
 ---
 
-License: MIT
+## Running the Demo (Mainnet Fork)
+
+Since Boros is Mainnet-only, we run the demo on a local fork of Arbitrum One.
+
+### Step 1: Start the Mainnet Fork
+
+Open a terminal and start Anvil. This downloads the real state of Arbitrum One to your machine.
+
+```bash
+# Requires Foundry (forge/cast/anvil)
+anvil --fork-url [https://arb1.arbitrum.io/rpc](https://arb1.arbitrum.io/rpc) --port 8545
+
+```
+
+### Step 2: Deploy the Vault
+
+In a new terminal, deploy the `StabilityVault` to your local fork.
+
+```bash
+cd contracts
+forge create --rpc-url [http://127.0.0.1:8545](http://127.0.0.1:8545) \
+  --private-key 0xac09... \
+  src/StabilityVault.sol:StabilityVault \
+  --constructor-args <YOUR_AGENT_ADDRESS>
+
+```
+
+*Copy the deployed contract address into your `.env` as `STABILITY_VAULT_ADDRESS`.*
+
+### Step 3: Run the Agent
+
+Start the Chainlink CRE Agent. It will monitor the (real) yields and execute hedges on the (forked) Boros protocol.
+
+```bash
+cd cre-workflow
+npm run start
+
+```
+
+### Step 4: Verify Boros Deposit
+
+To test the specific "Deposit into Boros" functionality manually:
+
+```bash
+npx ts-node cre-workflow/test-boros-deposit.ts
+
+```
+
+*Expected Output:*
+
+```
+[BOROS] Depositing via SDK...
+[BOROS] Deposit receipt: { status: "success", transactionHash: "0x..." }
+
+```
+
+---
+
+## Architecture: The "Hedge" Flow
+
+1. **Monitor:** The Agent tracks the spread between **Hyperliquid Funding** (Floating) and **Boros Yield** (Fixed).
+2. **Analyze:** If the spread > 8%, Gemini AI analyzes historical volatility to confirm a "Crash Risk."
+3. **Action:**
+* **Deposit:** The Vault deposits collateral (WETH) into the Boros Router.
+* **Delegate:** The Vault authorizes the Agent to sign orders.
+* **Short YU:** The Agent places a "Short Yield Unit" order on the Boros Order Book.
+
+
+4. **Result:** The user locks in a fixed rate, protecting their savings from dropping funding rates.
