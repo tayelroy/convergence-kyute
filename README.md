@@ -13,6 +13,7 @@ kYUte transforms passive crypto savings into intelligent, self-protecting assets
 ## 🚀 Features
 
 - **Yield Risk Pulse**: Real-time **Gemini 2.0 Flash** (Exp) analysis of market volatility (0-100 Risk Score).
+- **Cross-Chain Oracle Intelligence**: Compares **Hyperliquid** funding rates with **Boros** APRs to detect arbitrage-driven crash risks.
 - **Auto-Guard Agent**: An autonomous Chainlink CRE workflow that monitors your portfolio 24/7.
 - **Smart Hedging**: Automatically opens short Yield Unit (YU) positions on Boros when risk is critical.
 - **Consumer Dashboard**: Simple, visually rich interface to track savings and toggle protection.
@@ -59,7 +60,12 @@ The CRE workflow monitors yields, calls Gemini AI, and executes hedges via the V
 # In project root
 npx tsx cre-workflow/main.ts
 ```
-*Output: You should see the agent connecting to Arbitrum, checking Boros rates, and logging real AI risk scores.*
+The agent will:
+1.  **Monitor**: Fetch Boros APR (Arbitrum) & Hyperliquid Funding (Arbitrum L3).
+2.  **Analyze**: Gemini 2.0 Flash compares rates. If `HL >> Boros` (>5%), it predicts high crash risk.
+3.  **Execute**: If Risk > 70/100, it hedges via `StabilityVault`.
+
+> **Note**: Hyperliquid data is public (no API key needed).
 
 ### 2. Launch the Dashboard (Frontend)
 Track your savings and agent activity.
@@ -82,6 +88,7 @@ forge script contracts/script/DeployStabilityVault.s.sol --rpc-url $RPC_URL --br
 - **Mock Mode**: The agent gracefully falls back to mock logic if keys/contracts are missing, ensuring instant demo capability.
 - **Real AI**: Provide a valid `GEMINI_API_KEY` to see actual generative risk assessments.
 - **EVM Integration**: Verified on Arbitrum Sepolia testnet.
+- **Backtest**: Run `npx tsx cre-workflow/backtest.ts` to simulate high-volatility scenarios.
 
 ---
 

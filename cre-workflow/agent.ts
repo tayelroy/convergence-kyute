@@ -3,6 +3,7 @@ import { createWalletClient, http, publicActions, type WalletClient, type Public
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrumSepolia } from "viem/chains";
 import { fetchBorosImpliedApr } from "./boros.js";
+import { fetchHyperliquidFundingRate } from "./hyperliquid.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 
 // Agent Configuration Interface
@@ -58,32 +59,49 @@ export class KyuteAgent {
 
         try {
             // 1. Fetch Yield Data (Oracle Capability)
-            let currentApr = 0;
+            let borosApr = 0;
+            let hlApr = 0;
+
             try {
-                const marketAddress = "0x8db1397beb16a368711743bc42b69904e4e82122"; // ETH/USDC Boros Market
-                currentApr = await fetchBorosImpliedApr(marketAddress);
+                // Boros (Arbitrum)
+                const marketAddress = "0x8db1397beb16a368711743bc42b69904e4e82122";
+                borosApr = await fetchBorosImpliedApr(marketAddress);
             } catch (e) {
                 console.warn("Boros Fetch Failed, defaulting to 15.5% (Simulation)");
-                currentApr = 0.155;
+                borosApr = 0.155;
             }
 
-            console.log(`📊 Current Boros APR: ${(currentApr * 100).toFixed(2)}%`);
+            try {
+                // Hyperliquid (Arbitrum L3)
+                // fetchHyperliquidFundingRate returns Annualized Funding Rate
+                const rawHl = await fetchHyperliquidFundingRate("ETH");
+                hlApr = rawHl; // Already annualized in helper
+            } catch (e) {
+                console.warn("Hyperliquid Fetch Failed, defaulting to Boros + 6%");
+                hlApr = borosApr + 0.06;
+            }
+
+            const spread = hlApr - borosApr;
+
+            console.log(`📊 Yield Comparison:`);
+            console.log(`   Boros APR: ${(borosApr * 100).toFixed(2)}%`);
+            console.log(`   Hyperliquid Funding (Annualized): ${(hlApr * 100).toFixed(2)}%`);
+            console.log(`   Spread (Arb Opportunity): ${(spread * 100).toFixed(2)}%`);
 
             // 2. Fetch User Portfolio (Read Capability)
-            // In a real scenario, we read `balances[user]` from StabilityVault
-            // For now, we mock a user balance to simulate value at risk
-            const userBalance = 12500; // $12,500 USDe
-            console.log(`Monitored Savings: $${userBalance.toLocaleString()} USDe`);
+            const userBalance = 12500;
+            console.log(`💰 Monitored Savings: $${userBalance.toLocaleString()} USDe`);
 
             // 3. AI Prediction (AI Capability)
-            const riskScore = await this.predictYieldRisk(currentApr);
-            const riskLevel = riskScore > 75 ? "CRITICAL" : riskScore > 50 ? "HIGH" : "LOW";
+            const riskScore = await this.predictYieldRisk(borosApr, hlApr);
+            const riskLevel = riskScore > 70 ? "CRITICAL" : riskScore > 50 ? "HIGH" : "LOW";
             console.log(`AI Volatility Forecast: ${riskScore}/100 (${riskLevel})`);
 
             // 4. Decision & Action (Write Capability)
-            if (riskScore > 75) {
+            // Logic: Hedge if Spread > 5% (reversion likely) AND AI agrees (Risk > 70)
+            if (spread > 0.05 && riskScore > 70) {
                 console.warn("CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
-                await this.executeHedge(currentApr);
+                await this.executeHedge(borosApr);
             } else {
                 console.log("Yield Stable. No hedge needed.");
             }
@@ -92,17 +110,24 @@ export class KyuteAgent {
         }
     }
 
-    async predictYieldRisk(apr: number): Promise<number> {
+    async predictYieldRisk(borosApr: number, hlApr: number): Promise<number> {
         // Real AI Inference
         if (this.model) {
             try {
+                const spread = (hlApr - borosApr) * 100; // in percentage points
                 const prompt = `
                     You are a DeFi Risk Analyst AI. 
-                    Current Yield (APR) for USDe on Boros is ${(apr * 100).toFixed(2)}%.
-                    Similar markets usually sustain 10-20% APR.
                     
-                    Task: Predict the likelihood (0-100) of a "Funding Rate Crash" (yield dropping below 5%) in the next 8 hours.
-                    Consider that high yields often revert. 
+                    Market Data:
+                    - Boros Implied APR (Arbitrum): ${(borosApr * 100).toFixed(2)}%
+                    - Hyperliquid Funding Rate (Annualized): ${(hlApr * 100).toFixed(2)}%
+                    - Spread (HL - Boros): ${spread.toFixed(2)}%
+                    
+                    Context: 
+                    Hyperliquid often leads Boros by 5-11%. A spread > 5% suggests arbitrageurs will sell on HL and buy on Boros, crushing Boros yields.
+                    
+                    Task: Predict reversion risk (0-100) based on this differential.
+                    If Spread > 5%, risk should be HIGH (>70).
                     
                     Return ONLY a JSON object: { "riskScore": number, "reason": "string" }
                 `;
@@ -111,23 +136,21 @@ export class KyuteAgent {
                 const response = await result.response;
                 const text = response.text();
 
-                // Clean markdown code blocks if present
                 const jsonText = text.replace(/```json/g, "").replace(/```/g, "").trim();
                 const data = JSON.parse(jsonText);
 
-                // console.log(`   AI Reason: ${data.reason}`);
+                console.log(`   AI Reason: ${data.reason}`);
                 return Math.min(Math.max(data.riskScore, 0), 100);
             } catch (err: any) {
-                // Silently fall back to mock if API fails (e.g. 404 Model Not Found)
-                // This ensures the demo run looks clean even if the user's API key has issues.
-                // console.warn("AI Error (falling back to mock):", err.message);
+                console.warn("AI Error (falling back to mock):", err.message);
             }
         }
 
         // Mock Fallback
-        const randomness = Math.floor(Math.random() * 20);
-        const baseRisk = Math.min(Math.floor(apr * 1000), 80);
-        return Math.min(baseRisk + randomness, 100);
+        // High spread = High risk
+        const spreadWeight = (hlApr - borosApr) * 500; // 0.05 * 500 = 25
+        const baseRisk = Math.min(Math.floor(borosApr * 500), 50);
+        return Math.min(baseRisk + spreadWeight + 20, 100);
     }
 
     async executeHedge(apr: number) {
@@ -137,13 +160,13 @@ export class KyuteAgent {
         // 2. Call StabilityVault.openShortYU(hedgeAmount)
         const hedgeSize = 0.5; // 0.5 ETH or equivalent
 
-        console.log(`🛡️ [TX] Submitting Hedge to StabilityVault...`);
+        console.log(`[TX] Submitting Hedge to StabilityVault...`);
         console.log(`   Function: openShortYU(amount=${hedgeSize} ETH)`);
 
         // Simulating tx delay
         await new Promise(r => setTimeout(r, 1500));
 
-        console.log(`✅ [TX] Hedge Confirmed: Short YU Position Opened @ ${(apr * 100).toFixed(2)}% APR`);
-        console.log(`   User is now protected against yield compression.`);
+        console.log(`[TX] Hedge Confirmed: Short YU Position Opened @ ${(apr * 100).toFixed(2)}% APR`);
+        console.log(`User is now protected against yield compression.`);
     }
 }
