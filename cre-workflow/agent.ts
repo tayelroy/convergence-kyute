@@ -33,6 +33,8 @@ export class KyuteAgent {
 
     // Spread threshold to trigger AI (bps). Default 500 bps = 5.00%
     private aiTriggerSpreadBps = Number(process.env.AI_TRIGGER_SPREAD_BPS);
+    private hedgeCompositeThreshold = Number(process.env.HEDGE_COMPOSITE_THRESHOLD ?? "100");
+
 
     private wasAboveThreshold = false;
 
@@ -126,7 +128,7 @@ export class KyuteAgent {
             // 3. AI Prediction (only when spread threshold exceeded)
             const aboveThreshold = spreadBps >= this.aiTriggerSpreadBps;
             console.log(`[AI] spreadBps=${spreadBps.toFixed(0)} threshold=${this.aiTriggerSpreadBps}`);
-            
+
             let prediction: { riskScore: number; reason: string };
             if (aboveThreshold && !this.wasAboveThreshold) {
                 console.log(`[AI] Triggered on threshold cross. spread=${spreadBps.toFixed(0)} bps`);
@@ -157,9 +159,9 @@ export class KyuteAgent {
 
                 console.log(`   Volatility Factor: ${volFactor.toFixed(2)}x`);
                 console.log(`   Confidence Boost: +${confidenceBoost}`);
-                console.log(`   Composite Score: ${compositeScore.toFixed(2)}`);
+                console.log(`   Composite Score: ${compositeScore.toFixed(2)} (threshold=${this.hedgeCompositeThreshold})`);
 
-                if (compositeScore > 100) {
+                if (compositeScore >= this.hedgeCompositeThreshold) {
                     console.warn("CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
                     await this.executeHedge(borosApr);
                 } else {
@@ -195,7 +197,7 @@ export class KyuteAgent {
                     [${historyPct}]
 
                     Context: 
-                    Hyperliquid often leads Boros by 5-11%. A spread > 8% suggests arbitrageurs will sell on HL and buy on Boros, crushing Boros yields.
+                    Hyperliquid often leads Boros by 1-3%. A spread > 3% suggests arbitrageurs will sell on HL and buy on Boros, crushing Boros yields.
 
                     Task: Predict reversion risk (0-100) based on this differential and the recent spread trend.
                     Return ONLY a JSON object: { "riskScore": number, "reason": "string" }
