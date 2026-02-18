@@ -9,6 +9,11 @@
 node_modules/
 package-lock.json
 
+# Foundry
+contracts/lib/
+contracts/out/
+contracts/cache/
+
 # Environment
 .env
 .env.local
