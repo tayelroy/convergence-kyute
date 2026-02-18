@@ -218,19 +218,28 @@ export class KyuteAgent {
     }
 
     async executeHedge(apr: number) {
-        // Mock Interaction
-        // In prod: 
-        // 1. Calculate hedge size (e.g. 50% of portfolio)
-        // 2. Call StabilityVault.openShortYU(hedgeAmount)
-        const hedgeSize = 0.5; // 0.5 ETH or equivalent
-
+        const hedgeSizeWei = parseEther("0.5");
         console.log(`[TX] Submitting Hedge to StabilityVault...`);
-        console.log(`   Function: openShortYU(amount=${hedgeSize} ETH)`);
+        console.log(`   Contract: ${this.vaultAddress}`);
+        console.log(`   Function: openShortYU(${hedgeSizeWei} wei = 0.5 ETH)`);
 
-        // Simulating tx delay
-        await new Promise(r => setTimeout(r, 1500));
+        try {
+            const txHash = await this.client.writeContract({
+                address: this.vaultAddress as `0x${string}`,
+                abi: StabilityVaultABI,
+                functionName: "openShortYU",
+                args: [hedgeSizeWei],
+            });
+            console.log(`[TX] Broadcast: ${txHash}`);
 
-        console.log(`[TX] Hedge Confirmed: Short YU Position Opened @ ${(apr * 100).toFixed(2)}% APR`);
-        console.log(`User is now protected against yield compression.`);
+            const receipt = await this.client.waitForTransactionReceipt({ hash: txHash });
+            console.log(`[TX] Confirmed in block ${receipt.blockNumber}`);
+            console.log(`[TX] Hedge Executed: Short YU position opened @ ${(apr * 100).toFixed(2)}% APR`);
+            console.log(`User is now protected against yield compression.`);
+        } catch (err: unknown) {
+            const msg = err instanceof Error ? err.message : String(err);
+            console.error(`[TX] Hedge transaction failed: ${msg}`);
+            throw err;
+        }
     }
 }
