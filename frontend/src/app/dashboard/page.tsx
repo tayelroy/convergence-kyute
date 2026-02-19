@@ -8,12 +8,38 @@ import { SavingsPortfolio } from "@/components/dashboard/SavingsPortfolio";
 import { YieldRiskGauge } from "@/components/dashboard/YieldRiskGauge";
 import { GuardianControls } from "@/components/dashboard/GuardianControls";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
+import { useAgentStatus } from "@/hooks/useAgentStatus";
 import { ShieldAlert, Bell, Settings, Wallet } from "lucide-react";
 
 export default function DashboardPage() {
+    const { latest, loading } = useAgentStatus();
+
+    const borosAprDisplay = loading
+        ? "..."
+        : latest
+            ? `${latest.boros_rate.toFixed(2)}%`
+            : "--";
+
+    const hlAprDisplay = loading
+        ? "..."
+        : latest
+            ? `${latest.hyperliquid_rate.toFixed(2)}%`
+            : "--";
+
+    const spreadDisplay = loading
+        ? "..."
+        : latest
+            ? `${(latest.spread_bps / 100).toFixed(2)}%`
+            : "--";
+
     return (
         <DashboardLayout>
-            <TickerTape />
+            <TickerTape
+                assetSymbol={latest?.asset_symbol}
+                borosRate={latest?.boros_rate}
+                hyperliquidRate={latest?.hyperliquid_rate}
+                spreadBps={latest?.spread_bps}
+            />
 
             <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6 min-h-0">
 
@@ -49,16 +75,16 @@ export default function DashboardPage() {
                     {/* Quick Stats Row */}
                     <div className="grid grid-cols-3 gap-4">
                         <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">Total Protected Value</p>
-                            <p className="text-2xl font-mono text-white mt-1">$6,293.21</p>
+                            <p className="text-[10px] text-[#666] uppercase tracking-wider">Boros APR</p>
+                            <p className="text-2xl font-mono text-white mt-1">{borosAprDisplay}</p>
                         </div>
                         <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">Yield Earned (30d)</p>
-                            <p className="text-2xl font-mono text-[#00ff9d] mt-1">+$142.84</p>
+                            <p className="text-[10px] text-[#666] uppercase tracking-wider">HL Funding APR</p>
+                            <p className="text-2xl font-mono text-[#00ff9d] mt-1">{hlAprDisplay}</p>
                         </div>
                         <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">Hedge Costs</p>
-                            <p className="text-2xl font-mono text-[#fbbf24] mt-1">-$12.50</p>
+                            <p className="text-[10px] text-[#666] uppercase tracking-wider">Spread</p>
+                            <p className="text-2xl font-mono text-[#fbbf24] mt-1">{spreadDisplay}</p>
                         </div>
                     </div>
 
