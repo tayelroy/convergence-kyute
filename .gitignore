@@ -18,7 +18,8 @@ forge.lock
 contracts/broadcast/
 contracts/test-coverage/
 plan.md
-
+.anvil-state.json
+broadcast/
 # Environment
 .env
 .env.local

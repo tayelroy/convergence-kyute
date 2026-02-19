@@ -4,3 +4,6 @@ out/
 *.log
 .env
 .env.local
+.anvil-state.json
+broadcast/
+contracts/broadcast/
