@@ -1,4 +1,4 @@
-import { createWalletClient, http, publicActions, parseEther } from "viem";
+import { createWalletClient, createPublicClient, http, publicActions, parseEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrum } from "viem/chains";
 import { fetchBorosImpliedApr } from "./boros.js";
@@ -14,6 +14,25 @@ const _buildClient = (acct: ReturnType<typeof privateKeyToAccount>, rpcUrl: stri
         .extend(publicActions);
 
 type KyuteClient = ReturnType<typeof _buildClient>;
+const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".toLowerCase();
+const ERC20_BALANCE_OF_ABI = [
+    {
+        name: "balanceOf",
+        type: "function",
+        stateMutability: "view",
+        inputs: [{ name: "account", type: "address" }],
+        outputs: [{ name: "", type: "uint256" }],
+    },
+] as const;
+const WETH_DEPOSIT_ABI = [
+    {
+        name: "deposit",
+        type: "function",
+        stateMutability: "payable",
+        inputs: [],
+        outputs: [],
+    },
+] as const;
 
 // Agent Configuration Interface
 interface AgentConfig {
@@ -57,6 +76,18 @@ export class KyuteAgent {
 
         this.geminiKey = config.geminiKey;
         this.vaultAddress = config.vaultAddress;
+
+        try {
+            const borosPublicClient = require("@pendle/sdk-boros/dist/entities/publicClient");
+            borosPublicClient.publicClient = createPublicClient({
+                chain: arbitrum,
+                transport: http(this.rpcUrl),
+            });
+        } catch (error) {
+            const msg = error instanceof Error ? error.message : String(error);
+            console.warn(`[BOROS] Could not override SDK public client: ${msg}`);
+        }
+
         try {
             this.exchange = new Exchange(this.client as any, this.accountAddress, 0, [this.rpcUrl]);
         } catch (error) {
@@ -68,7 +99,7 @@ export class KyuteAgent {
         // Initialize Gemini AI if key is present
         if (this.geminiKey) {
             this.genAI = new GoogleGenerativeAI(this.geminiKey);
-            const modelName = "gemini-2.0-flash-exp";
+            const modelName = "gemini-3.0-flash-preview"; // DO NOT CHANGE THIS
             this.model = this.genAI.getGenerativeModel({ model: modelName });
         }
 
@@ -320,11 +351,13 @@ export class KyuteAgent {
         const allAssetsResp = await (this.exchange as any).borosCoreSdk.assets.assetsControllerGetAllAssets();
         const allAssets = Array.isArray(allAssetsResp?.results)
             ? allAssetsResp.results
-            : Array.isArray(allAssetsResp?.data)
-                ? allAssetsResp.data
-                : Array.isArray(allAssetsResp)
-                    ? allAssetsResp
-                    : [];
+            : Array.isArray(allAssetsResp?.data?.assets)
+                ? allAssetsResp.data.assets
+                : Array.isArray(allAssetsResp?.data)
+                    ? allAssetsResp.data
+                    : Array.isArray(allAssetsResp)
+                        ? allAssetsResp
+                        : [];
 
         const collateralAsset = allAssets.find((asset: any) => {
             const assetAddress = (asset?.tokenAddress ?? asset?.address ?? "").toLowerCase();
@@ -341,6 +374,34 @@ export class KyuteAgent {
             throw new Error("[BOROS] Invalid collateral asset metadata");
         }
         console.log(`[BOROS] Collateral resolved. tokenId=${tokenId} tokenAddress=${tokenAddress}`);
+
+        const currentBalance = await this.client.readContract({
+            address: tokenAddress,
+            abi: ERC20_BALANCE_OF_ABI,
+            functionName: "balanceOf",
+            args: [this.accountAddress],
+        });
+
+        if (currentBalance < amount) {
+            const missingAmount = amount - currentBalance;
+            if (tokenAddress.toLowerCase() !== WETH_ADDRESS) {
+                throw new Error(
+                    `[BOROS] Insufficient collateral balance. need=${amount.toString()} have=${currentBalance.toString()}`
+                );
+            }
+
+            console.log(
+                `[BOROS] Insufficient WETH. Wrapping missing ${missingAmount.toString()} wei from ETH balance...`
+            );
+            const wrapTxHash = await this.client.writeContract({
+                address: tokenAddress,
+                abi: WETH_DEPOSIT_ABI,
+                functionName: "deposit",
+                value: missingAmount,
+            });
+            const wrapReceipt = await this.client.waitForTransactionReceipt({ hash: wrapTxHash });
+            console.log(`[BOROS] WETH top-up confirmed in block ${wrapReceipt.blockNumber}`);
+        }
 
         await this.exchange.deposit({
             userAddress: this.accountAddress,

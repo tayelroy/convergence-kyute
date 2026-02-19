@@ -1,4 +1,4 @@
-import { createWalletClient, http, parseEther } from "viem";
+import { createWalletClient, http, parseEther, publicActions } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrum } from "viem/chains";
 import dotenv from "dotenv";
@@ -21,7 +21,7 @@ async function main() {
     account,
     chain: arbitrum, // OK for an Anvil fork of Arbitrum One
     transport: http(ANVIL_RPC_URL),
-  });
+  }).extend(publicActions);
 
   const txHash = await client.writeContract({
     address: STABILITY_VAULT_ADDRESS as `0x${string}`,
@@ -31,6 +31,11 @@ async function main() {
   });
 
   console.log("Deposit tx:", txHash);
+  const receipt = await client.waitForTransactionReceipt({ hash: txHash });
+  console.log("Deposit confirmed in block:", receipt.blockNumber);
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});
