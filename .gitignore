@@ -13,6 +13,11 @@ package-lock.json
 contracts/lib/
 contracts/out/
 contracts/cache/
+contracts/artifacts/
+forge.lock
+contracts/broadcast/
+contracts/test-coverage/
+plan.md
 
 # Environment
 .env
