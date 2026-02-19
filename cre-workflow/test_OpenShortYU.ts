@@ -23,18 +23,17 @@ async function main() {
     transport: http(RPC_URL),
   }).extend(publicActions);
 
-  const market = "0x8db1397beb16a368711743bc42b69904e4e82122"; // ETH-USDC market (Arbitrum One)
   const amount = parseEther("0.5");
 
-  console.log("[SIM] Simulating openShortYU...");
+  console.log("[SIM] Simulating recordHedge...");
   const { request } = await client.simulateContract({
     address: STABILITY_VAULT_ADDRESS as `0x${string}`,
     abi: StabilityVaultABI,
-    functionName: "openShortYU",
-    args: [market, amount],
+    functionName: "recordHedge",
+    args: [amount],
   });
 
-  console.log("[TX] Sending openShortYU...");
+  console.log("[TX] Sending recordHedge...");
   const hash = await client.writeContract(request);
   console.log("[TX] Sent:", hash);
 
