@@ -5,7 +5,7 @@ import { fetchBorosImpliedApr } from "./boros.js";
 import { fetchHyperliquidFundingRate } from "./hyperliquid.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { StabilityVaultABI } from "./abi/StabilityVaultABI.js";
-import { Exchange } from "@pendle/sdk-boros";
+import { AccountLib, Agent, Exchange, MarketAccLib, Side, TimeInForce } from "@pendle/sdk-boros";
 
 // Inferred client type for viem (WalletClient + PublicActions combined)
 const _buildClient = (acct: ReturnType<typeof privateKeyToAccount>, rpcUrl: string) =>
@@ -32,6 +32,12 @@ export class KyuteAgent {
     private model: any = null;
     private exchange: Exchange | null = null;
     private borosAccountId = 0;
+    private borosRootAddress: `0x${string}`;
+    private borosTokenId = 0;
+    private borosAgent: Agent | null = null;
+    private useBorosAgentFlow = false;
+    private fallbackToVaultOnBorosFailure = true;
+    private autoApproveBorosAgent = false;
 
     // State for volatility analysis (last 24 data points)
     private historicalSpreads: number[] = [];
@@ -59,14 +65,32 @@ export class KyuteAgent {
 
         const parsedAccountId = Number(process.env.BOROS_ACCOUNT_ID ?? "0");
         this.borosAccountId = Number.isFinite(parsedAccountId) ? parsedAccountId : 0;
+        const parsedTokenId = Number(process.env.BOROS_TOKEN_ID ?? "0");
+        this.borosTokenId = Number.isFinite(parsedTokenId) ? parsedTokenId : 0;
+
+        this.useBorosAgentFlow = (process.env.BOROS_USE_AGENT_FLOW ?? "false").toLowerCase() === "true";
+        this.fallbackToVaultOnBorosFailure = (process.env.BOROS_FALLBACK_TO_VAULT ?? "true").toLowerCase() !== "false";
+        this.autoApproveBorosAgent = (process.env.BOROS_AUTO_APPROVE_AGENT ?? "false").toLowerCase() === "true";
 
         const rootAddress = (process.env.BOROS_ROOT_ADDRESS as `0x${string}` | undefined) ?? this.accountAddress;
+        this.borosRootAddress = rootAddress;
         try {
             this.exchange = new Exchange(this.client as any, rootAddress, this.borosAccountId, [this.rpcUrl]);
         } catch (error) {
             this.exchange = null;
             const msg = error instanceof Error ? error.message : String(error);
             console.warn(`[BOROS] SDK initialization failed: ${msg}`);
+        }
+
+        const configuredAgentPk = process.env.BOROS_AGENT_PRIVATE_KEY as `0x${string}` | undefined;
+        if (configuredAgentPk && this.exchange) {
+            try {
+                this.borosAgent = Agent.createFromPrivateKey(configuredAgentPk);
+                this.exchange.setAgent(this.borosAgent);
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                console.warn(`[BOROS] Agent init failed: ${msg}`);
+            }
         }
 
         // Initialize Gemini AI if key is present
@@ -83,6 +107,10 @@ export class KyuteAgent {
         console.log(`   Chain ID: ${chainId}`);
         if (this.exchange) {
             console.log(`Boros SDK: Ready (accountId=${this.borosAccountId})`);
+            console.log(`Boros Execution Mode: ${this.useBorosAgentFlow ? "Agent Flow" : "Vault Call"}`);
+            if (this.useBorosAgentFlow && !this.borosAgent) {
+                console.warn("Boros Agent Flow enabled but BOROS_AGENT_PRIVATE_KEY is missing; will use vault fallback if enabled.");
+            }
         } else {
             console.warn("Boros SDK: Not initialized. Hedge fallback will skip SDK preflight.");
         }
@@ -283,8 +311,62 @@ export class KyuteAgent {
         return targetMarket?.marketId ?? null;
     }
 
+    private async ensureBorosAgentApproval(): Promise<void> {
+        if (!this.exchange || !this.borosAgent) {
+            throw new Error("Boros agent flow requires initialized Exchange + Agent");
+        }
+
+        const account = AccountLib.pack(this.borosRootAddress, this.borosAccountId);
+        const expiry = await this.borosAgent.getExpiry(account);
+        const now = Math.floor(Date.now() / 1000);
+
+        if (expiry > now + 300) {
+            return;
+        }
+
+        if (!this.autoApproveBorosAgent) {
+            throw new Error("Boros agent is not approved or near expiry. Set BOROS_AUTO_APPROVE_AGENT=true or approve manually.");
+        }
+
+        console.log("[BOROS] Approving agent for root account...");
+        const approveResult = await this.exchange.approveAgent(this.borosAgent);
+        console.log("[BOROS] Agent approved:", approveResult);
+    }
+
+    private async executeBorosAgentHedge(marketAddress: `0x${string}`, size: bigint): Promise<void> {
+        if (!this.exchange || !this.borosAgent) {
+            throw new Error("Boros agent flow not configured");
+        }
+
+        await this.ensureBorosAgentApproval();
+
+        const marketId = await this.resolveBorosMarketId(marketAddress);
+        if (marketId === null) {
+            throw new Error(`Boros market ${marketAddress} not found in SDK market list`);
+        }
+
+        const marketAcc = MarketAccLib.pack(this.borosRootAddress, this.borosAccountId, this.borosTokenId, marketId);
+        const side = (process.env.BOROS_ORDER_SIDE ?? "SHORT").toUpperCase() === "LONG" ? Side.LONG : Side.SHORT;
+        const slippage = Number(process.env.BOROS_ORDER_SLIPPAGE ?? "0.05");
+
+        console.log(`[BOROS] Submitting agent order. marketId=${marketId} tokenId=${this.borosTokenId} side=${side === Side.SHORT ? "SHORT" : "LONG"}`);
+
+        const orderResult = await this.exchange.placeOrder({
+            marketAcc,
+            marketId,
+            side,
+            size,
+            tif: TimeInForce.IMMEDIATE_OR_CANCEL,
+            slippage,
+        });
+
+        console.log("[BOROS] Agent order executed:", orderResult.executeResponse);
+    }
+
     async executeHedge(apr: number) {
-        const hedgeSizeWei = parseEther("0.5");
+        const hedgeSizeWei = process.env.BOROS_ORDER_SIZE_WEI
+            ? BigInt(process.env.BOROS_ORDER_SIZE_WEI)
+            : parseEther("0.5");
         const BOROS_ETH_MARKET = (process.env.BOROS_MARKET_ADDRESS ?? "0x8db1397beb16a368711743bc42b69904e4e82122") as `0x${string}`;
 
         if (this.exchange) {
@@ -298,6 +380,21 @@ export class KyuteAgent {
                 const msg = error instanceof Error ? error.message : String(error);
                 console.error(`[BOROS] Preflight failed, aborting hedge: ${msg}`);
                 throw error;
+            }
+        }
+
+        if (this.useBorosAgentFlow) {
+            try {
+                await this.executeBorosAgentHedge(BOROS_ETH_MARKET, hedgeSizeWei);
+                console.log(`[TX] Hedge Executed via Boros Agent Flow @ ${(apr * 100).toFixed(2)}% APR`);
+                return;
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                console.error(`[BOROS] Agent flow hedge failed: ${msg}`);
+                if (!this.fallbackToVaultOnBorosFailure) {
+                    throw error;
+                }
+                console.warn("[BOROS] Falling back to StabilityVault openShortYU...");
             }
         }
 
