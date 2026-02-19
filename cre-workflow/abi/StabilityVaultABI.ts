@@ -14,13 +14,20 @@ export const StabilityVaultABI = [
     outputs: [],
   },
   {
-    name: "openShortYU",
+    name: "HedgeRecorded",
+    type: "event",
+    anonymous: false,
+    inputs: [
+      { name: "agent", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+      { name: "timestamp", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    name: "recordHedge",
     type: "function",
     stateMutability: "nonpayable",
-    inputs: [
-      { name: "market", type: "address" },
-      { name: "amount", type: "uint256" },
-    ],
+    inputs: [{ name: "amount", type: "uint256" }],
     outputs: [],
   },
 ] as const;
