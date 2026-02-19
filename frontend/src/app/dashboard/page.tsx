@@ -1,4 +1,3 @@
-
 "use client";
 
 import React from "react";
@@ -14,36 +13,22 @@ import { ShieldAlert, Bell, Settings, Wallet } from "lucide-react";
 export default function DashboardPage() {
     const { latest, loading } = useAgentStatus();
 
-    const borosAprDisplay = loading
-        ? "..."
-        : latest
-            ? `${latest.boros_rate.toFixed(2)}%`
-            : "--";
-
-    const hlAprDisplay = loading
-        ? "..."
-        : latest
-            ? `${latest.hyperliquid_rate.toFixed(2)}%`
-            : "--";
-
-    const spreadDisplay = loading
-        ? "..."
-        : latest
-            ? `${(latest.spread_bps / 100).toFixed(2)}%`
-            : "--";
+    const borosAprDisplay = loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
+    const hlAprDisplay    = loading ? "..." : latest ? `${latest.hl_apr.toFixed(2)}%`    : "--";
+    const spreadDisplay   = loading ? "..." : latest ? `${(latest.spread_bps / 100).toFixed(2)}%` : "--";
 
     return (
         <DashboardLayout>
             <TickerTape
                 assetSymbol={latest?.asset_symbol}
-                borosRate={latest?.boros_rate}
-                hyperliquidRate={latest?.hyperliquid_rate}
+                borosRate={latest?.boros_apr}
+                hyperliquidRate={latest?.hl_apr}
                 spreadBps={latest?.spread_bps}
             />
 
             <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6 min-h-0">
 
-                {/* LEFT COLUMN: Main Savings Dash (8 cols) */}
+                {/* LEFT COLUMN */}
                 <div className="col-span-8 flex flex-col h-full gap-6 overflow-hidden">
 
                     {/* Header Row */}
@@ -54,14 +39,14 @@ export default function DashboardPage() {
                                 <h1 className="text-2xl font-bold text-white tracking-tight">kYUte SAVINGS GUARD</h1>
                             </div>
                             <p className="text-xs text-[#666] font-mono mt-1 ml-8">
-                                AI-POWERED YIELD PROTECTION • ARBITRUM SEPOLIA
+                                AI-POWERED YIELD PROTECTION • ARBITRUM ONE (MAINNET FORK)
                             </p>
                         </div>
 
                         <div className="flex items-center space-x-3">
                             <button className="flex items-center gap-2 px-3 py-1.5 border border-[#1a1a1a] bg-[#0a0a0a] rounded-sm text-xs text-[#888] hover:text-white transition-colors">
                                 <Wallet size={14} />
-                                <span>0x71C...9A2</span>
+                                <span>{latest ? `${latest.asset_symbol} Vault` : "No Wallet"}</span>
                             </button>
                             <button className="p-2 border border-[#1a1a1a] bg-[#0a0a0a] text-[#666] hover:text-white transition-colors rounded-sm">
                                 <Bell size={16} />
@@ -95,7 +80,7 @@ export default function DashboardPage() {
 
                 </div>
 
-                {/* RIGHT COLUMN: AI & Controls (4 cols) */}
+                {/* RIGHT COLUMN */}
                 <div className="col-span-4 flex flex-col h-full gap-4 overflow-hidden">
 
                     {/* 1. AI Risk Gauge */}
@@ -108,14 +93,16 @@ export default function DashboardPage() {
                         <GuardianControls />
                     </div>
 
-                    {/* 3. Helper Info / Alerts */}
+                    {/* 3. Yield Alert */}
                     <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-sm">
                         <div className="flex gap-2">
-                            <Bell size={14} className="text-blue-400 mt-1" />
+                            <Bell size={14} className="text-blue-400 mt-1 shrink-0" />
                             <div>
                                 <h4 className="text-xs font-bold text-blue-400">Yield Alert</h4>
                                 <p className="text-[10px] text-blue-200/70 mt-1 leading-tight">
-                                    USDe funding rates are spiking. AI predicts a 65% chance of correction in 4h. kYUte is monitoring.
+                                    {latest
+                                        ? `Spread is ${latest.spread_bps} bps. AI trigger at ${process.env.NEXT_PUBLIC_AI_TRIGGER_BPS ?? "800"} bps.`
+                                        : "kYUte is monitoring yield spreads..."}
                                 </p>
                             </div>
                         </div>

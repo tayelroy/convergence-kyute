@@ -42,6 +42,16 @@ interface AgentConfig {
     vaultAddress: string;
 }
 
+interface HedgeEventContext {
+    hlApr: number;
+    spreadBps: number;
+    userBalance: number;
+    riskScore: number;
+    riskLevel: string;
+    compositeScore: number;
+    reason: string;
+}
+
 export class KyuteAgent {
     private client: KyuteClient;
     private rpcUrl: string;
@@ -59,6 +69,7 @@ export class KyuteAgent {
     private aiTriggerSpreadBps = Number(process.env.AI_TRIGGER_SPREAD_BPS);
     private hedgeCompositeThreshold = Number(process.env.HEDGE_COMPOSITE_THRESHOLD ?? "100");
     private supabase: SupabaseClient | null = null;
+    private fundingRatesInsertEnabled = true;
 
 
     private wasAboveThreshold = false;
@@ -181,16 +192,33 @@ export class KyuteAgent {
             }
             console.log(`Monitored Vault ETH: ${userBalance.toFixed(4)} ETH`);
 
+            if (this.supabase) {
+                const { error } = await this.supabase.from("kyute_events").insert({
+                    timestamp: new Date().toISOString(),
+                    asset_symbol: "ETH",
+                    event_type: "snapshot",
+                    boros_apr: borosApr * 100,
+                    hl_apr: hlApr * 100,
+                    spread_bps: Math.round(spreadBps),
+                    vault_balance_eth: userBalance,
+                });
+
+                if (error) {
+                    console.error("[Supabase] Failed to insert kyute_events snapshot row:", error.message);
+                }
+            }
+
             // Push spread history (rolling window of 24)
             if (this.historicalSpreads.length >= 24) this.historicalSpreads.shift();
             this.historicalSpreads.push(spread);
 
             // 3. AI Prediction (only when spread threshold exceeded)
             const aboveThreshold = spreadBps >= this.aiTriggerSpreadBps;
+            const aiTriggered = aboveThreshold && !this.wasAboveThreshold;
             console.log(`[AI] spreadBps=${spreadBps.toFixed(0)} threshold=${this.aiTriggerSpreadBps}`);
 
             let prediction: { riskScore: number; reason: string };
-            if (aboveThreshold && !this.wasAboveThreshold) {
+            if (aiTriggered) {
                 console.log(`[AI] Triggered on threshold cross. spread=${spreadBps.toFixed(0)} bps`);
                 prediction = await this.predictYieldRisk(borosApr, hlApr, this.historicalSpreads);
             } else {
@@ -223,15 +251,44 @@ export class KyuteAgent {
 
                 if (compositeScore >= this.hedgeCompositeThreshold) {
                     console.warn("CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
-                    await this.executeHedge(borosApr);
+                    await this.executeHedge(borosApr, {
+                        hlApr,
+                        spreadBps,
+                        userBalance,
+                        riskScore,
+                        riskLevel,
+                        compositeScore,
+                        reason: prediction.reason,
+                    });
                 } else {
                     console.log("Yield Stable. No hedge needed.");
+                }
+
+                if (aiTriggered && this.supabase) {
+                    const { error } = await this.supabase.from("kyute_events").insert({
+                        timestamp: new Date().toISOString(),
+                        asset_symbol: "ETH",
+                        event_type: "ai_trigger",
+                        boros_apr: borosApr * 100,
+                        hl_apr: hlApr * 100,
+                        spread_bps: Math.round(spreadBps),
+                        vault_balance_eth: userBalance,
+                        risk_score: riskScore,
+                        risk_level: riskLevel,
+                        composite_score: compositeScore,
+                        reason: prediction.reason,
+                        action: compositeScore >= this.hedgeCompositeThreshold ? "HEDGE" : "HOLD",
+                    });
+
+                    if (error) {
+                        console.error("[Supabase] Failed to insert kyute_events ai_trigger row:", error.message);
+                    }
                 }
             } catch (error) {
                 console.error("Decision Logic Error:", error);
             }
 
-            if (this.supabase) {
+            if (this.supabase && this.fundingRatesInsertEnabled) {
                 const { error } = await this.supabase
                     .from("funding_rates")
                     .insert({
@@ -244,7 +301,16 @@ export class KyuteAgent {
                     });
 
                 if (error) {
-                    console.error("[Supabase] Failed to insert funding_rates row:", error.message);
+                    const tableMissing = error.message.includes("public.funding_rates")
+                        || error.message.includes("funding_rates");
+
+                    if (tableMissing) {
+                        this.fundingRatesInsertEnabled = false;
+                        console.error("[Supabase] funding_rates table is missing; disabling funding_rates writes for this run.");
+                        console.error("[Supabase] Create table: id bigint generated always as identity primary key, timestamp timestamptz, asset_symbol text, boros_rate numeric, hyperliquid_rate numeric, spread_bps integer, median_apr numeric.");
+                    } else {
+                        console.error("[Supabase] Failed to insert funding_rates row:", error.message);
+                    }
                 }
             }
         } catch (error) {
@@ -318,7 +384,7 @@ export class KyuteAgent {
         return keywords.some(word => reason ? reason.toLowerCase().includes(word) : false) ? 20 : 0;
     }
 
-    async executeHedge(apr: number) {
+    async executeHedge(apr: number, context?: HedgeEventContext) {
         if (!this.exchange) {
             throw new Error("[BOROS] Exchange not initialized");
         }
@@ -424,5 +490,30 @@ export class KyuteAgent {
 
         const receipt = await this.client.waitForTransactionReceipt({ hash: txHash });
         console.log(`[BOROS] recordHedge confirmed in block ${receipt.blockNumber}`);
+
+        if (this.supabase && context) {
+            const { error } = await this.supabase.from("kyute_events").insert({
+                timestamp: new Date().toISOString(),
+                asset_symbol: "ETH",
+                event_type: "hedge",
+                boros_apr: apr * 100,
+                hl_apr: context.hlApr * 100,
+                spread_bps: Math.round(context.spreadBps),
+                vault_balance_eth: context.userBalance,
+                risk_score: context.riskScore,
+                risk_level: context.riskLevel,
+                composite_score: context.compositeScore,
+                reason: context.reason,
+                action: "HEDGE",
+                amount_eth: Number.parseFloat(depositAmountEth),
+                market_address: marketAddress,
+                collateral_address: WETH_ADDRESS,
+                status: "success",
+            });
+
+            if (error) {
+                console.error("[Supabase] Failed to insert kyute_events hedge row:", error.message);
+            }
+        }
     }
 }
