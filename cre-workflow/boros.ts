@@ -56,7 +56,7 @@ export async function fetchBorosImpliedApr(marketAddress: string): Promise<numbe
 
     // Exchange requires: walletClient, rootAddress, accountId, rpcUrls[], agent?
     const exchange = new Exchange(
-        walletClient,
+        walletClient as any,
         account.address,
         0, // accountId
         [rpcUrl] // rpcUrls

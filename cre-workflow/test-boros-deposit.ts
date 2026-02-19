@@ -45,7 +45,7 @@ async function main() {
   });
 
   const accountId = 0;
-  const exchange = new Exchange(walletClient, account.address, accountId, [RPC_URL]);
+  const exchange = new Exchange(walletClient as any, account.address, accountId, [RPC_URL]);
   const amount = toBigIntAmount(BOROS_DEPOSIT_AMOUNT_ETH);
 
   // Look up marketId from market address

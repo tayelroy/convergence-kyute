@@ -5,6 +5,7 @@ import { fetchBorosImpliedApr } from "./boros.js";
 import { fetchHyperliquidFundingRate } from "./hyperliquid.js";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import { StabilityVaultABI } from "./abi/StabilityVaultABI.js";
+import { Exchange } from "@pendle/sdk-boros";
 
 // Inferred client type for viem (WalletClient + PublicActions combined)
 const _buildClient = (acct: ReturnType<typeof privateKeyToAccount>, rpcUrl: string) =>
@@ -23,10 +24,14 @@ interface AgentConfig {
 
 export class KyuteAgent {
     private client: KyuteClient;
+    private rpcUrl: string;
+    private accountAddress: `0x${string}`;
     private geminiKey: string;
     private vaultAddress: string;
     private genAI: GoogleGenerativeAI | null = null;
     private model: any = null;
+    private exchange: Exchange | null = null;
+    private borosAccountId = 0;
 
     // State for volatility analysis (last 24 data points)
     private historicalSpreads: number[] = [];
@@ -46,9 +51,23 @@ export class KyuteAgent {
             chain: arbitrum,
             transport: http(config.rpcUrl)
         }).extend(publicActions);
+        this.rpcUrl = config.rpcUrl;
+        this.accountAddress = account.address;
 
         this.geminiKey = config.geminiKey;
         this.vaultAddress = config.vaultAddress;
+
+        const parsedAccountId = Number(process.env.BOROS_ACCOUNT_ID ?? "0");
+        this.borosAccountId = Number.isFinite(parsedAccountId) ? parsedAccountId : 0;
+
+        const rootAddress = (process.env.BOROS_ROOT_ADDRESS as `0x${string}` | undefined) ?? this.accountAddress;
+        try {
+            this.exchange = new Exchange(this.client as any, rootAddress, this.borosAccountId, [this.rpcUrl]);
+        } catch (error) {
+            this.exchange = null;
+            const msg = error instanceof Error ? error.message : String(error);
+            console.warn(`[BOROS] SDK initialization failed: ${msg}`);
+        }
 
         // Initialize Gemini AI if key is present
         if (this.geminiKey) {
@@ -62,6 +81,11 @@ export class KyuteAgent {
         console.log("EVM Connection: Connected to Arbitrum One (fork)");
         const chainId = await this.client.getChainId();
         console.log(`   Chain ID: ${chainId}`);
+        if (this.exchange) {
+            console.log(`Boros SDK: Ready (accountId=${this.borosAccountId})`);
+        } else {
+            console.warn("Boros SDK: Not initialized. Hedge fallback will skip SDK preflight.");
+        }
 
         if (!this.genAI) {
             console.warn("AI Capability: No valid GEMINI_API_KEY found.");
@@ -241,9 +265,42 @@ export class KyuteAgent {
         return keywords.some(word => reason ? reason.toLowerCase().includes(word) : false) ? 20 : 0;
     }
 
+    private async resolveBorosMarketId(marketAddress: string): Promise<number | null> {
+        if (!this.exchange) return null;
+
+        const marketsResp = await this.exchange.getMarkets({
+            skip: 0,
+            limit: 100,
+            isWhitelisted: true,
+        }) as {
+            results?: Array<{ marketId: number; address: string }>;
+        };
+
+        const targetMarket = marketsResp.results?.find(
+            (market) => market.address.toLowerCase() === marketAddress.toLowerCase()
+        );
+
+        return targetMarket?.marketId ?? null;
+    }
+
     async executeHedge(apr: number) {
         const hedgeSizeWei = parseEther("0.5");
-        const BOROS_ETH_MARKET = "0x8db1397beb16a368711743bc42b69904e4e82122";
+        const BOROS_ETH_MARKET = (process.env.BOROS_MARKET_ADDRESS ?? "0x8db1397beb16a368711743bc42b69904e4e82122") as `0x${string}`;
+
+        if (this.exchange) {
+            try {
+                const marketId = await this.resolveBorosMarketId(BOROS_ETH_MARKET);
+                if (marketId === null) {
+                    throw new Error(`Boros market ${BOROS_ETH_MARKET} not found in SDK market list`);
+                }
+                console.log(`[BOROS] SDK preflight ok. marketId=${marketId}`);
+            } catch (error) {
+                const msg = error instanceof Error ? error.message : String(error);
+                console.error(`[BOROS] Preflight failed, aborting hedge: ${msg}`);
+                throw error;
+            }
+        }
+
         console.log(`[TX] Submitting Hedge to StabilityVault...`);
         console.log(`   Contract: ${this.vaultAddress}`);
         console.log(`   Market: ${BOROS_ETH_MARKET}`);
