@@ -115,6 +115,24 @@ SUPABASE_KEY=eyJh...
 | `borosMarketAddress` | `0x...` (40 hex) | `0x0000...0000` | Pendle Boros market contract on Arbitrum |
 | `minSpreadThresholdBps` | integer ≥ 1 | `20` | Minimum spread (bps) to trigger execution |
 
+### Boros Agent Execution (optional)
+
+When enabled, the hedge path executes via Boros Agent flow (`Exchange.placeOrder`) and signs/submits via Boros backend.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `BOROS_USE_AGENT_FLOW` | `true/false` | `false` | Enable agent-sign + backend-submit flow for hedge execution |
+| `BOROS_AGENT_PRIVATE_KEY` | `0x...` | _none_ | Private key for delegated Boros agent signer |
+| `BOROS_AUTO_APPROVE_AGENT` | `true/false` | `false` | Auto-approve agent when missing/expired |
+| `BOROS_ROOT_ADDRESS` | `0x...` | agent wallet | Root account authorized for Boros agent execution |
+| `BOROS_ACCOUNT_ID` | integer | `0` | Boros account ID |
+| `BOROS_TOKEN_ID` | integer | `0` | Collateral token ID used to build `marketAcc` |
+| `BOROS_MARKET_ADDRESS` | `0x...` | ETH market | Boros market address to trade |
+| `BOROS_ORDER_SIZE_WEI` | bigint string | `0.5 ETH` | Order size passed into SDK order request |
+| `BOROS_ORDER_SIDE` | `LONG/SHORT` | `SHORT` | Agent order side |
+| `BOROS_ORDER_SLIPPAGE` | number | `0.05` | Slippage passed to SDK `placeOrder` |
+| `BOROS_FALLBACK_TO_VAULT` | `true/false` | `true` | Fallback to `openShortYU` if agent flow fails |
+
 ---
 
 ## Output Example
