@@ -4,7 +4,7 @@ import { Layers, ArrowUpRight, ArrowDownRight } from "lucide-react";
 import { useAgentStatus } from "@/hooks/useAgentStatus";
 
 export default function PositionsPage() {
-    const { hedges, loading } = useAgentStatus();
+    const { hedges, loading, error, degraded, warnings } = useAgentStatus();
 
     return (
         <div className="space-y-6">
@@ -16,6 +16,15 @@ export default function PositionsPage() {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
+                {(error || degraded) && !loading && (
+                    <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-5 text-sm text-yellow-200">
+                        {error ? `Data status: ${error}` : "Data status: degraded telemetry mode."}
+                        {warnings.length > 0 && (
+                            <p className="text-xs text-yellow-200/70 mt-2 font-mono">{warnings[0]}</p>
+                        )}
+                    </div>
+                )}
+
                 {!loading && hedges.length === 0 && (
                     <div className="rounded-xl border border-white/[0.06] bg-[#0c0c14] p-5 text-sm text-neutral-400">
                         No live hedge positions recorded yet.

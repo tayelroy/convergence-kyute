@@ -35,17 +35,32 @@ export interface AiDecision {
     action: string;
 }
 
+interface SourceState {
+    ok: boolean;
+    error: string | null;
+    rows: number;
+}
+
 interface AgentStatusResponse {
     latest:  AgentSnapshot | null;
     history: AgentSnapshot[];
     hedges:  HedgeEvent[];
     aiLogs:  AiDecision[];
+    degraded?: boolean;
+    warnings?: string[];
+    generatedAt?: string;
+    sources?: {
+        snapshots: SourceState;
+        hedges: SourceState;
+        aiLogs: SourceState;
+    };
 }
 
 export function useAgentStatus() {
     const [data, setData] = useState<AgentStatusResponse | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [lastUpdated, setLastUpdated] = useState<string | null>(null);
 
     useEffect(() => {
         let cancelled = false;
@@ -57,11 +72,19 @@ export function useAgentStatus() {
                 const json = (await res.json()) as AgentStatusResponse;
                 if (!cancelled) {
                     setData(json);
-                    setError(null);
+                    setLastUpdated(json.generatedAt ?? new Date().toISOString());
+                    if (json.degraded) {
+                        const warningMessage = json.warnings?.[0] ?? "Data feed degraded";
+                        setError(`Degraded mode: ${warningMessage}`);
+                    } else {
+                        setError(null);
+                    }
                 }
             } catch (e: unknown) {
                 const message = e instanceof Error ? e.message : "Failed to load agent status";
-                if (!cancelled) setError(message);
+                if (!cancelled) {
+                    setError(message);
+                }
             } finally {
                 if (!cancelled) setLoading(false);
             }
@@ -78,6 +101,10 @@ export function useAgentStatus() {
     return {
         loading,
         error,
+        degraded: data?.degraded ?? false,
+        warnings: data?.warnings ?? [],
+        sources: data?.sources ?? null,
+        lastUpdated,
         latest:  data?.latest  ?? null,
         history: data?.history ?? [],
         hedges:  data?.hedges  ?? [],

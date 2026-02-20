@@ -23,7 +23,7 @@ const statusConfig = {
 };
 
 export default function HistoryPage() {
-    const { aiLogs, hedges, loading } = useAgentStatus();
+    const { aiLogs, hedges, loading, error, degraded, warnings } = useAgentStatus();
 
     const rows = useMemo(() => {
         const aiRows = aiLogs.map((log, index) => ({
@@ -63,6 +63,15 @@ export default function HistoryPage() {
                     View past arbitrage scans and executed trades.
                 </p>
             </div>
+
+            {(error || degraded) && !loading && (
+                <div className="rounded-xl border border-yellow-500/20 bg-yellow-500/5 p-4 text-sm text-yellow-200">
+                    {error ? `Data status: ${error}` : "Data status: degraded telemetry mode."}
+                    {warnings.length > 0 && (
+                        <p className="text-xs text-yellow-200/70 mt-2 font-mono">{warnings[0]}</p>
+                    )}
+                </div>
+            )}
 
             <div className="rounded-xl border border-white/[0.06] bg-[#0c0c14] overflow-hidden">
                 <table className="w-full">
