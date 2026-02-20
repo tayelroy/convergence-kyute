@@ -1,53 +1,8 @@
 "use client";
 
 import { History, ExternalLink, CheckCircle2, XCircle, Clock } from "lucide-react";
-
-const mockHistory = [
-    {
-        id: "1",
-        asset: "BTC",
-        action: "EXECUTE",
-        spreadBps: 650,
-        notional: 1_000_000,
-        profit: 342.5,
-        status: "executed" as const,
-        timestamp: "2026-02-16 00:45:12",
-        txHash: "0xabc123...def456",
-    },
-    {
-        id: "2",
-        asset: "ETH",
-        action: "SKIP",
-        spreadBps: 140,
-        notional: 0,
-        profit: 0,
-        status: "skipped" as const,
-        timestamp: "2026-02-16 00:40:08",
-        txHash: null,
-    },
-    {
-        id: "3",
-        asset: "SOL",
-        action: "EXECUTE",
-        spreadBps: 830,
-        notional: 750_000,
-        profit: 186.2,
-        status: "executed" as const,
-        timestamp: "2026-02-16 00:35:44",
-        txHash: "0x789ghi...jkl012",
-    },
-    {
-        id: "4",
-        asset: "DOGE",
-        action: "EXECUTE",
-        spreadBps: 1260,
-        notional: 500_000,
-        profit: 98.7,
-        status: "pending" as const,
-        timestamp: "2026-02-16 00:30:21",
-        txHash: "0xmno345...pqr678",
-    },
-];
+import { useMemo } from "react";
+import { useAgentStatus } from "@/hooks/useAgentStatus";
 
 const statusConfig = {
     executed: {
@@ -68,6 +23,38 @@ const statusConfig = {
 };
 
 export default function HistoryPage() {
+    const { aiLogs, hedges, loading } = useAgentStatus();
+
+    const rows = useMemo(() => {
+        const aiRows = aiLogs.map((log, index) => ({
+            id: `ai-${index}-${log.timestamp}`,
+            asset: log.asset_symbol,
+            action: log.action,
+            spreadBps: log.spread_bps,
+            notional: 0,
+            profit: 0,
+            status: log.action === "HEDGE" ? "executed" as const : "skipped" as const,
+            timestamp: log.timestamp,
+            txHash: null as string | null,
+        }));
+
+        const hedgeRows = hedges.map((hedge, index) => ({
+            id: `hedge-${index}-${hedge.timestamp}`,
+            asset: hedge.asset_symbol,
+            action: "EXECUTE",
+            spreadBps: hedge.spread_bps,
+            notional: Number(hedge.amount_eth ?? 0),
+            profit: 0,
+            status: hedge.status === "success" ? "executed" as const : "pending" as const,
+            timestamp: hedge.timestamp,
+            txHash: hedge.market_address ?? null,
+        }));
+
+        return [...aiRows, ...hedgeRows]
+            .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
+            .slice(0, 20);
+    }, [aiLogs, hedges]);
+
     return (
         <div className="space-y-6">
             <div>
@@ -94,7 +81,14 @@ export default function HistoryPage() {
                         </tr>
                     </thead>
                     <tbody>
-                        {mockHistory.map((row) => {
+                        {!loading && rows.length === 0 && (
+                            <tr>
+                                <td colSpan={8} className="px-5 py-6 text-center text-sm text-neutral-500">
+                                    No live history events yet.
+                                </td>
+                            </tr>
+                        )}
+                        {rows.map((row) => {
                             const status = statusConfig[row.status];
                             const StatusIcon = status.icon;
                             return (
@@ -103,7 +97,7 @@ export default function HistoryPage() {
                                     className="border-b border-white/[0.03] hover:bg-white/[0.02] transition-colors"
                                 >
                                     <td className="px-5 py-3.5 text-xs font-mono text-neutral-400">
-                                        {row.timestamp}
+                                        {new Date(row.timestamp).toLocaleString()}
                                     </td>
                                     <td className="px-5 py-3.5 text-sm font-semibold text-white">
                                         {row.asset}
@@ -120,7 +114,7 @@ export default function HistoryPage() {
                                     </td>
                                     <td className="px-5 py-3.5 text-sm font-mono text-neutral-300">
                                         {row.notional > 0
-                                            ? `$${(row.notional / 1_000).toFixed(0)}K`
+                                            ? `${row.notional.toFixed(4)} ETH`
                                             : "—"}
                                     </td>
                                     <td className="px-5 py-3.5 text-sm font-mono text-emerald-400">
