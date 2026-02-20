@@ -1,11 +1,24 @@
 
 "use client";
 
-import React, { useState } from "react";
-import { motion } from "framer-motion";
+import React from "react";
+import type { AiDecision, AgentSnapshot, HedgeEvent } from "@/hooks/useAgentStatus";
 
-export function GuardianControls() {
-    const [isActive, setIsActive] = useState(false);
+interface GuardianControlsProps {
+    latest: AgentSnapshot | null;
+    aiLogs: AiDecision[];
+    hedges: HedgeEvent[];
+    loading?: boolean;
+}
+
+export function GuardianControls({ latest, aiLogs, hedges, loading = false }: GuardianControlsProps) {
+    const aiTriggerBps = Number(process.env.NEXT_PUBLIC_AI_TRIGGER_BPS ?? "800");
+    const hedgeThreshold = Number(process.env.NEXT_PUBLIC_HEDGE_COMPOSITE_THRESHOLD ?? "100");
+    const latestAi = aiLogs[0] ?? null;
+    const latestHedge = hedges[0] ?? null;
+
+    const isActive = !loading && !!latest;
+    const statusText = loading ? "STARTING" : isActive ? "ACTIVE" : "WAITING";
 
     return (
         <div className={`p-4 rounded-sm border transition-all duration-300 ${isActive ? "border-[#00ff9d] bg-[#00ff9d]/5" : "border-[#333] bg-[#0a0a0a]"}`}>
@@ -14,26 +27,27 @@ export function GuardianControls() {
                     <h3 className="text-white font-bold text-sm tracking-wider">AUTO-GUARD</h3>
                     <p className="text-[10px] text-[#666] font-mono mt-1">Autonomous Hedging Agent</p>
                 </div>
-
-                <button
-                    onClick={() => setIsActive(!isActive)}
-                    className={`w-12 h-6 rounded-full p-1 transition-colors duration-300 ${isActive ? "bg-[#00ff9d]" : "bg-[#333]"}`}
-                >
-                    <motion.div
-                        layout
-                        className="w-4 h-4 bg-black rounded-full shadow-lg"
-                    />
-                </button>
+                <span className={`text-[10px] font-mono px-2 py-1 rounded-sm border ${isActive ? "text-[#00ff9d] border-[#00ff9d]/30" : "text-[#888] border-[#333]"}`}>
+                    {statusText}
+                </span>
             </div>
 
             <div className="mt-4 border-t border-[#222] pt-3">
                 <div className="flex justify-between text-[10px] font-mono text-[#888]">
-                    <span>Safety Threshold</span>
-                    <span className="text-white">75 RISK SCORE</span>
+                    <span>AI Trigger</span>
+                    <span className="text-white">{aiTriggerBps} BPS</span>
                 </div>
                 <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
-                    <span>Max Hedge Size</span>
-                    <span className="text-white">0.5 ETH</span>
+                    <span>Hedge Score Threshold</span>
+                    <span className="text-white">{hedgeThreshold}</span>
+                </div>
+                <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
+                    <span>Latest AI Decision</span>
+                    <span className="text-white">{latestAi ? `${latestAi.action} (${latestAi.risk_score})` : "N/A"}</span>
+                </div>
+                <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
+                    <span>Latest Hedge</span>
+                    <span className="text-white">{latestHedge ? `${Number(latestHedge.amount_eth ?? 0).toFixed(4)} ETH` : "N/A"}</span>
                 </div>
             </div>
 
@@ -43,7 +57,9 @@ export function GuardianControls() {
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-[#00ff9d] opacity-75"></span>
                         <span className="relative inline-flex rounded-full h-2 w-2 bg-[#00ff9d]"></span>
                     </span>
-                    <span className="text-[10px] text-[#00ff9d] font-mono">AGENT MONITORING...</span>
+                    <span className="text-[10px] text-[#00ff9d] font-mono">
+                        MONITORING {latest ? `${latest.asset_symbol} SPREAD=${latest.spread_bps} BPS` : "LIVE FEED"}
+                    </span>
                 </div>
             )}
         </div>

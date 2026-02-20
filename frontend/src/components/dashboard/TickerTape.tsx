@@ -6,6 +6,7 @@ interface TickerTapeProps {
     borosRate?: number | null;
     hyperliquidRate?: number | null;
     spreadBps?: number | null;
+    degraded?: boolean;
 }
 
 interface TickerItemProps {
@@ -43,6 +44,7 @@ export function TickerTape({
     borosRate = null,
     hyperliquidRate = null,
     spreadBps = null,
+    degraded = false,
 }: TickerTapeProps) {
     const items = (
         <>
@@ -51,7 +53,7 @@ export function TickerTape({
             <TickerItem symbol={`${assetSymbol} Spread`} price={spreadBps} change={0} isSpread />
             <div className="flex items-center px-6 text-[#444] text-xs border-r border-[#1a1a1a]">
                 <Activity size={12} className="mr-2" />
-                {borosRate == null ? "LOADING..." : "MARKET STATUS: ACTIVE"}
+                {borosRate == null ? "LOADING..." : degraded ? "MARKET STATUS: DEGRADED" : "MARKET STATUS: ACTIVE"}
             </div>
         </>
     );

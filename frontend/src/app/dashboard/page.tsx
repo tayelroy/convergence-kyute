@@ -12,6 +12,9 @@ import { ShieldAlert, Bell, Settings, Wallet } from "lucide-react";
 
 export default function DashboardPage() {
     const { latest, hedges, aiLogs, loading, error, degraded, warnings, lastUpdated } = useAgentStatus();
+    const hasSnapshotProof = !!latest;
+    const hasAiProof = aiLogs.length > 0;
+    const hasHedgeProof = hedges.length > 0;
 
     const borosAprDisplay = loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay    = loading ? "..." : latest ? `${latest.hl_apr.toFixed(2)}%`    : "--";
@@ -24,6 +27,7 @@ export default function DashboardPage() {
                 borosRate={latest?.boros_apr}
                 hyperliquidRate={latest?.hl_apr}
                 spreadBps={latest?.spread_bps}
+                degraded={degraded}
             />
 
             <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6 min-h-0">
@@ -94,7 +98,6 @@ export default function DashboardPage() {
                             )}
                         </div>
                     )}
-
                     {/* Main Portfolio Table */}
                     <div className="flex-1 min-h-0 relative overflow-hidden">
                         <SavingsPortfolio latest={latest} hedges={hedges} loading={loading} />
@@ -112,7 +115,7 @@ export default function DashboardPage() {
 
                     {/* 2. Guardian Controls */}
                     <div className="flex-none">
-                        <GuardianControls />
+                        <GuardianControls latest={latest} aiLogs={aiLogs} hedges={hedges} loading={loading} />
                     </div>
 
                     {/* 3. Yield Alert */}
