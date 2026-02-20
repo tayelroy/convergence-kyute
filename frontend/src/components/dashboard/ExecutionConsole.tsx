@@ -1,42 +1,34 @@
 
 "use client";
 
-import React, { useEffect, useRef, useState } from "react";
+import React, { useMemo, useRef, useEffect } from "react";
 import { Terminal } from "lucide-react";
+import type { AiDecision, HedgeEvent } from "@/hooks/useAgentStatus";
 
-const INITIAL_LOGS = [
-    "[SYSTEM] kYUte Agent initialized v1.0.0",
-    "[INFO] Connecting to Arbitrum Sepolia RPC...",
-    "[SUCCESS] Wallet Connected: 0x71C...9A2",
-    "[MONITOR] Savings Balance: 6,293.21 USD",
-    "[AI] Querying Gemini Pro for BTC Volatility...",
-    "[AI] Risk Score: 45/100 (Moderate)",
-    "[GUARD] Yield is stable. No hedge required.",
-    "[UPDATE] USDe APY: 15.4% | Boros Short Cost: 8.2%",
-    "[HIBERNATE] Sleeping for 30s...",
-];
+interface ExecutionConsoleProps {
+    aiLogs: AiDecision[];
+    hedges: HedgeEvent[];
+    loading?: boolean;
+}
 
-export function ExecutionConsole() {
+export function ExecutionConsole({ aiLogs, hedges, loading = false }: ExecutionConsoleProps) {
     const scrollRef = useRef<HTMLDivElement>(null);
-    const [logs, setLogs] = useState(INITIAL_LOGS);
-    const [mounted, setMounted] = useState(false);
 
-    useEffect(() => {
-        setMounted(true);
-        // Simulate live logs
-        const interval = setInterval(() => {
-            const newLog = Math.random() > 0.7
-                ? `[MONITOR] Heartbeat: All Systems Normal`
-                : Math.random() > 0.5
-                    ? `[AI] Re-evaluating Market Sentiment...`
-                    : null;
+    const logs = useMemo(() => {
+        const aiEntries = aiLogs.map((item) => ({
+            timestamp: item.timestamp,
+            message: `[AI] ${item.action} risk=${item.risk_score}/100 level=${item.risk_level} spread=${item.spread_bps}bps`,
+        }));
 
-            if (newLog) {
-                setLogs(prev => [...prev.slice(-19), newLog]);
-            }
-        }, 5000);
-        return () => clearInterval(interval);
-    }, []);
+        const hedgeEntries = hedges.map((item) => ({
+            timestamp: item.timestamp,
+            message: `[BOROS] ${item.status ?? "unknown"} amount=${Number(item.amount_eth ?? 0).toFixed(4)} ETH market=${item.market_address ?? "n/a"}`,
+        }));
+
+        return [...aiEntries, ...hedgeEntries]
+            .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
+            .slice(-25);
+    }, [aiLogs, hedges]);
 
     // Auto-scroll to bottom
     useEffect(() => {
@@ -44,8 +36,6 @@ export function ExecutionConsole() {
             scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
         }
     }, [logs]);
-
-    if (!mounted) return null;
 
     return (
         <div className="flex flex-col h-full bg-[#030303] border border-[#1a1a1a] rounded-sm font-mono text-xs overflow-hidden">
@@ -58,12 +48,18 @@ export function ExecutionConsole() {
                 ref={scrollRef}
                 className="flex-1 overflow-y-auto p-3 space-y-1 text-[#4bf3a6]"
             >
+                {loading && logs.length === 0 && (
+                    <div className="opacity-80 pl-2 text-[#666]">Loading live events...</div>
+                )}
+                {!loading && logs.length === 0 && (
+                    <div className="opacity-80 pl-2 text-[#666]">No events yet. Agent heartbeat will appear after first cycle.</div>
+                )}
                 {logs.map((log, i) => (
                     <div key={i} className="opacity-80 hover:opacity-100 border-l-2 border-transparent hover:border-[#4bf3a6] pl-2 transition-all">
                         <span className="text-[#444] mr-2 text-[10px]">
-                            {new Date().toLocaleTimeString([], { hour12: false })}
+                            {new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}
                         </span>
-                        {log}
+                        {log.message}
                     </div>
                 ))}
                 {/* Blinking cursor */}
