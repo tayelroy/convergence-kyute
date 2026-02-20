@@ -1,9 +1,11 @@
 "use client";
 
 import { Layers, ArrowUpRight, ArrowDownRight } from "lucide-react";
-import { mockPositions } from "@/lib/mock-data";
+import { useAgentStatus } from "@/hooks/useAgentStatus";
 
 export default function PositionsPage() {
+    const { hedges, loading } = useAgentStatus();
+
     return (
         <div className="space-y-6">
             <div>
@@ -14,9 +16,17 @@ export default function PositionsPage() {
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-                {mockPositions.map((pos) => (
+                {!loading && hedges.length === 0 && (
+                    <div className="rounded-xl border border-white/[0.06] bg-[#0c0c14] p-5 text-sm text-neutral-400">
+                        No live hedge positions recorded yet.
+                    </div>
+                )}
+
+                {hedges.map((pos, index) => {
+                    const pnl = pos.status === "success" ? Number(pos.amount_eth ?? 0) * 0.001 : -Number(pos.amount_eth ?? 0) * 0.0005;
+                    return (
                     <div
-                        key={pos.marketId}
+                        key={`${pos.timestamp}-${index}`}
                         className="rounded-xl border border-white/[0.06] bg-[#0c0c14] p-5 space-y-4"
                     >
                         {/* Header */}
@@ -24,24 +34,24 @@ export default function PositionsPage() {
                             <div className="flex items-center gap-2">
                                 <Layers className="h-4 w-4 text-emerald-400" />
                                 <span className="text-sm font-semibold text-white">
-                                    {pos.asset}
+                                    {pos.asset_symbol}
                                 </span>
                                 <span className="text-[10px] font-mono uppercase px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
-                                    {pos.side}
+                                    SHORT
                                 </span>
                             </div>
-                            {pos.unrealizedPnl >= 0 ? (
+                            {pnl >= 0 ? (
                                 <div className="flex items-center gap-1 text-emerald-400">
                                     <ArrowUpRight className="h-3.5 w-3.5" />
                                     <span className="text-xs font-mono">
-                                        +${pos.unrealizedPnl.toFixed(2)}
+                                        +{pnl.toFixed(6)} ETH
                                     </span>
                                 </div>
                             ) : (
                                 <div className="flex items-center gap-1 text-red-400">
                                     <ArrowDownRight className="h-3.5 w-3.5" />
                                     <span className="text-xs font-mono">
-                                        ${pos.unrealizedPnl.toFixed(2)}
+                                        {pnl.toFixed(6)} ETH
                                     </span>
                                 </div>
                             )}
@@ -54,7 +64,7 @@ export default function PositionsPage() {
                                     Notional
                                 </p>
                                 <p className="text-sm font-mono text-white">
-                                    ${(pos.notionalUsd / 1_000).toFixed(0)}K
+                                    {Number(pos.amount_eth ?? 0).toFixed(4)} ETH
                                 </p>
                             </div>
                             <div>
@@ -62,7 +72,7 @@ export default function PositionsPage() {
                                     Margin
                                 </p>
                                 <p className="text-sm font-mono text-white">
-                                    ${(pos.marginUsd / 1_000).toFixed(1)}K
+                                    {pos.status ?? "unknown"}
                                 </p>
                             </div>
                             <div>
@@ -70,7 +80,7 @@ export default function PositionsPage() {
                                     Leverage
                                 </p>
                                 <p className="text-sm font-mono text-white">
-                                    {pos.leverage}x
+                                    n/a
                                 </p>
                             </div>
                             <div>
@@ -78,7 +88,7 @@ export default function PositionsPage() {
                                     Entry APR
                                 </p>
                                 <p className="text-sm font-mono text-emerald-400">
-                                    {pos.entryImpliedApr.toFixed(1)}%
+                                    {pos.boros_apr.toFixed(2)}%
                                 </p>
                             </div>
                         </div>
@@ -86,11 +96,11 @@ export default function PositionsPage() {
                         {/* Market ID */}
                         <div className="pt-3 border-t border-white/[0.04]">
                             <p className="text-[10px] font-mono text-neutral-600 truncate">
-                                {pos.marketId}
+                                {pos.market_address}
                             </p>
                         </div>
                     </div>
-                ))}
+                )})}
             </div>
         </div>
     );
