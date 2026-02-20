@@ -1,22 +1,36 @@
 
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import { motion } from "framer-motion";
+import type { AgentSnapshot, HedgeEvent } from "@/hooks/useAgentStatus";
 
-export function SavingsPortfolio() {
-    // Mock Data (In prod, fetch from hook)
-    const holdings = [
-        { asset: "USDe", balance: 5043.21, apy: 15.4, risk: "Low" },
-        { asset: "ATOM", balance: 1250.00, apy: 18.2, risk: "Medium" },
-        { asset: "ETH", balance: 0.54, apy: 3.8, risk: "Low" },
-    ];
+interface SavingsPortfolioProps {
+    latest: AgentSnapshot | null;
+    hedges: HedgeEvent[];
+    loading?: boolean;
+}
+
+export function SavingsPortfolio({ latest, hedges, loading = false }: SavingsPortfolioProps) {
+    const latestHedge = hedges[0] ?? null;
+    const risk = latest && latest.spread_bps >= 800 ? "High" : latest && latest.spread_bps >= 300 ? "Medium" : "Low";
+
+    const holdings = latest
+        ? [{
+            asset: latest.asset_symbol,
+            balance: latest.vault_balance_eth,
+            apy: latest.boros_apr,
+            risk,
+        }]
+        : [];
+
+    const totalValueLabel = latest ? `${latest.vault_balance_eth.toFixed(4)} ETH` : "--";
 
     return (
         <div className="h-full w-full bg-[#0a0a0a] border border-[#1a1a1a] rounded-sm p-4 overflow-auto">
             <div className="flex items-center justify-between mb-4">
                 <h2 className="text-sm font-bold text-white tracking-widest uppercase">My Savings</h2>
-                <span className="text-xs text-[#666] font-mono">Total Value: $7,245.42</span>
+                <span className="text-xs text-[#666] font-mono">Vault Balance: {loading ? "..." : totalValueLabel}</span>
             </div>
 
             <table className="w-full text-left border-collapse">
@@ -38,8 +52,8 @@ export function SavingsPortfolio() {
                             className="border-b border-[#111] hover:bg-[#0f0f0f] transition-colors"
                         >
                             <td className="py-3 pl-2 font-mono text-sm text-white">{h.asset}</td>
-                            <td className="py-3 font-mono text-sm text-[#888]">{h.balance.toLocaleString()}</td>
-                            <td className="py-3 font-mono text-sm text-[#00ff9d]">{h.apy}%</td>
+                            <td className="py-3 font-mono text-sm text-[#888]">{h.balance.toFixed(4)} ETH</td>
+                            <td className="py-3 font-mono text-sm text-[#00ff9d]">{h.apy.toFixed(2)}%</td>
                             <td className="py-3 pr-2 text-right">
                                 <span
                                     className={`px-2 py-1 text-[10px] uppercase tracking-wider rounded-sm ${h.risk === "High"
@@ -54,6 +68,20 @@ export function SavingsPortfolio() {
                             </td>
                         </motion.tr>
                     ))}
+                    {!loading && holdings.length === 0 && (
+                        <tr>
+                            <td colSpan={4} className="py-6 text-center text-xs text-[#666] font-mono">
+                                No live vault snapshots yet.
+                            </td>
+                        </tr>
+                    )}
+                    {latestHedge && (
+                        <tr className="border-b border-[#111]">
+                            <td colSpan={4} className="py-3 pl-2 text-[10px] text-[#666] font-mono">
+                                Last hedge: {Number(latestHedge.amount_eth ?? 0).toFixed(4)} ETH @ {new Date(latestHedge.timestamp).toLocaleString()}
+                            </td>
+                        </tr>
+                    )}
                 </tbody>
             </table>
         </div>
