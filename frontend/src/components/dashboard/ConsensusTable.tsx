@@ -12,21 +12,8 @@ interface RateRow {
     timestamp?: string;
 }
 
-// Fixed rates for demo purposes (Boros APY usually stable)
-const FIXED_RATES: Record<string, number> = {
-    BTC: 4.5,
-    ETH: 3.8,
-    SOL: 10.0
-};
-
-// Mock Data as initial state / fallback
-const INITIAL_DATA: RateRow[] = [
-    { asset: "BTC", cexMedian: 0.00, fixedRate: 4.5, spreadBps: 0.00 },
-    { asset: "ETH", cexMedian: 0.00, fixedRate: 3.8, spreadBps: 0.00 },
-];
-
 export function ConsensusTable() {
-    const [data, setData] = useState<RateRow[]>(INITIAL_DATA);
+    const [data, setData] = useState<RateRow[]>([]);
 
     useEffect(() => {
         // 1. Initial Fetch
@@ -40,10 +27,6 @@ export function ConsensusTable() {
             if (error) {
                 console.error("Supabase fetch error:", error);
                 console.error("Error details:", JSON.stringify(error, null, 2));
-                // If the table doesn't exist, we might get a 404-like error wrapped in an object
-                if (error.code === '42P01') { // undefined_table
-                    console.warn("Table 'funding_rates' does not exist. Using mock data.");
-                }
                 return;
             }
 
@@ -54,16 +37,14 @@ export function ConsensusTable() {
                 // Reverse to process oldest first, so newest overwrites
                 [...rows].reverse().forEach((row: any) => {
                     const asset = row.asset_symbol;
-                    const fixed = FIXED_RATES[asset] || 0;
-                    const medianRaw = row.median_apr || 0;
-                    // Annualize: raw * 3 * 365 * 100
-                    const medianAnnual = medianRaw * 3 * 365 * 100;
-                    const spread = (medianAnnual - fixed) * 100; // % to bps
+                    const fixed = Number(row.boros_rate ?? 0);
+                    const medianApr = Number(row.median_apr ?? 0);
+                    const spread = Number(row.spread_bps ?? 0);
 
                     latestStats[asset] = {
                         asset,
 
-                        cexMedian: medianAnnual,
+                        cexMedian: medianApr,
                         fixedRate: fixed,
                         spreadBps: spread,
                         timestamp: row.timestamp
@@ -95,10 +76,9 @@ export function ConsensusTable() {
                     console.log('Real-time update:', payload);
                     const newRow = payload.new as any;
                     const asset = newRow.asset_symbol;
-                    const fixed = FIXED_RATES[asset] || 0;
-                    const medianRaw = newRow.median_apr || 0;
-                    const medianAnnual = medianRaw * 3 * 365 * 100;
-                    const spread = (medianAnnual - fixed) * 100;
+                    const fixed = Number(newRow.boros_rate ?? 0);
+                    const medianApr = Number(newRow.median_apr ?? 0);
+                    const spread = Number(newRow.spread_bps ?? 0);
 
                     // Update state with new row
                     setData(prev => {
@@ -107,7 +87,7 @@ export function ConsensusTable() {
                         const newItem: RateRow = {
                             asset,
 
-                            cexMedian: medianAnnual,
+                            cexMedian: medianApr,
                             fixedRate: fixed,
                             spreadBps: spread,
                             timestamp: newRow.timestamp
@@ -139,6 +119,9 @@ export function ConsensusTable() {
             </div>
 
             <div className="divide-y divide-[#111] overflow-y-auto">
+                {data.length === 0 && (
+                    <div className="px-4 py-6 text-xs text-[#666] font-mono">Waiting for live funding rate rows...</div>
+                )}
                 {data.map((row) => {
                     const isProfitable = row.spreadBps > 0;
                     return (
