@@ -11,7 +11,7 @@ import { useAgentStatus } from "@/hooks/useAgentStatus";
 import { ShieldAlert, Bell, Settings, Wallet } from "lucide-react";
 
 export default function DashboardPage() {
-    const { latest, hedges, aiLogs, loading } = useAgentStatus();
+    const { latest, hedges, aiLogs, loading, error, degraded, warnings, lastUpdated } = useAgentStatus();
 
     const borosAprDisplay = loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay    = loading ? "..." : latest ? `${latest.hl_apr.toFixed(2)}%`    : "--";
@@ -72,6 +72,28 @@ export default function DashboardPage() {
                             <p className="text-2xl font-mono text-[#fbbf24] mt-1">{spreadDisplay}</p>
                         </div>
                     </div>
+
+                    {(error || degraded || !latest) && !loading && (
+                        <div className="p-3 border rounded-sm bg-yellow-500/5 border-yellow-500/30">
+                            <p className="text-xs text-yellow-300 font-mono">
+                                {error
+                                    ? `Data status: ${error}`
+                                    : !latest
+                                        ? "Data status: awaiting first live snapshot from agent."
+                                        : "Data status: degraded telemetry mode."}
+                            </p>
+                            {warnings.length > 0 && (
+                                <p className="text-[10px] text-yellow-200/70 mt-1 font-mono truncate">
+                                    {warnings[0]}
+                                </p>
+                            )}
+                            {lastUpdated && (
+                                <p className="text-[10px] text-yellow-200/50 mt-1 font-mono">
+                                    Last API update: {new Date(lastUpdated).toLocaleString()}
+                                </p>
+                            )}
+                        </div>
+                    )}
 
                     {/* Main Portfolio Table */}
                     <div className="flex-1 min-h-0 relative overflow-hidden">
