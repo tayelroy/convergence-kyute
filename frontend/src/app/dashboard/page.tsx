@@ -11,7 +11,7 @@ import { useAgentStatus } from "@/hooks/useAgentStatus";
 import { ShieldAlert, Bell, Settings, Wallet } from "lucide-react";
 
 export default function DashboardPage() {
-    const { latest, loading } = useAgentStatus();
+    const { latest, hedges, aiLogs, loading } = useAgentStatus();
 
     const borosAprDisplay = loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay    = loading ? "..." : latest ? `${latest.hl_apr.toFixed(2)}%`    : "--";
@@ -75,7 +75,7 @@ export default function DashboardPage() {
 
                     {/* Main Portfolio Table */}
                     <div className="flex-1 min-h-0 relative overflow-hidden">
-                        <SavingsPortfolio />
+                        <SavingsPortfolio latest={latest} hedges={hedges} loading={loading} />
                     </div>
 
                 </div>
@@ -85,7 +85,7 @@ export default function DashboardPage() {
 
                     {/* 1. AI Risk Gauge */}
                     <div className="flex-none">
-                        <YieldRiskGauge />
+                        <YieldRiskGauge latest={latest} aiLogs={aiLogs} loading={loading} />
                     </div>
 
                     {/* 2. Guardian Controls */}
@@ -110,7 +110,7 @@ export default function DashboardPage() {
 
                     {/* 4. Execution Logs */}
                     <div className="flex-1 min-h-0 relative overflow-hidden">
-                        <ExecutionConsole />
+                        <ExecutionConsole aiLogs={aiLogs} hedges={hedges} loading={loading} />
                     </div>
                 </div>
 
