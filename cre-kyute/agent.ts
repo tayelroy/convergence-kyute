@@ -14,6 +14,7 @@ const _buildClient = (acct: ReturnType<typeof privateKeyToAccount>, rpcUrl: stri
         .extend(publicActions);
 
 type KyuteClient = ReturnType<typeof _buildClient>;
+const ENV = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env ?? {};
 const WETH_ADDRESS = "0x82aF49447D8a07e3bd95BD0d56f35241523fBab1".toLowerCase();
 const ERC20_BALANCE_OF_ABI = [
     {
@@ -33,7 +34,7 @@ const WETH_DEPOSIT_ABI = [
         outputs: [],
     },
 ] as const;
-const CHAINLINK_ETH_USD_FEED = (process.env.CHAINLINK_ETH_USD_FEED_ADDRESS ?? "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612") as `0x${string}`;
+const CHAINLINK_ETH_USD_FEED = (ENV.CHAINLINK_ETH_USD_FEED_ADDRESS ?? "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612") as `0x${string}`;
 const AGGREGATOR_V3_ABI = [
     {
         name: "decimals",
@@ -103,8 +104,8 @@ export class KyuteAgent {
     private historicalSpreads: number[] = [];
 
     // Spread threshold to trigger AI (bps). Default 500 bps = 5.00%
-    private aiTriggerSpreadBps = Number(process.env.AI_TRIGGER_SPREAD_BPS);
-    private hedgeCompositeThreshold = Number(process.env.HEDGE_COMPOSITE_THRESHOLD ?? "100");
+    private aiTriggerSpreadBps = Number(ENV.AI_TRIGGER_SPREAD_BPS);
+    private hedgeCompositeThreshold = Number(ENV.HEDGE_COMPOSITE_THRESHOLD ?? "100");
     private supabase: SupabaseClient | null = null;
     private fundingRatesInsertEnabled = true;
     private lastAutomationTxHashLogged: string | null = null;
@@ -152,8 +153,8 @@ export class KyuteAgent {
             this.model = this.genAI.getGenerativeModel({ model: modelName });
         }
 
-        const supabaseUrl = process.env.SUPABASE_URL;
-        const supabaseKey = process.env.SUPABASE_KEY;
+        const supabaseUrl = ENV.SUPABASE_URL;
+        const supabaseKey = ENV.SUPABASE_KEY;
         if (supabaseUrl && supabaseKey) {
             this.supabase = createClient(supabaseUrl, supabaseKey);
         } else {
@@ -179,7 +180,7 @@ export class KyuteAgent {
         }
     }
 
-    async executeWorkflow() {
+    async executeWorkflow(): Promise<string> {
         const timestamp = new Date().toLocaleTimeString();
         console.log(`\n--- kyute Workflow [${timestamp}] ---`);
 
@@ -356,8 +357,12 @@ export class KyuteAgent {
                     }
                 }
             }
+
+            return "SUCCESS - Workflow execution completed.";
         } catch (error) {
             console.error("Agent Workflow Error:", error);
+            const msg = error instanceof Error ? error.message : String(error);
+            return `ERROR - ${msg}`;
         }
     }
 
@@ -432,9 +437,9 @@ export class KyuteAgent {
             throw new Error("[BOROS] Exchange not initialized");
         }
 
-        const marketAddress = process.env.BOROS_MARKET_ADDRESS as `0x${string}` | undefined;
-        const collateralAddress = process.env.BOROS_COLLATERAL_ADDRESS as `0x${string}` | undefined;
-        const depositAmountEth = process.env.BOROS_DEPOSIT_AMOUNT_ETH ?? "0.5";
+        const marketAddress = ENV.BOROS_MARKET_ADDRESS as `0x${string}` | undefined;
+        const collateralAddress = ENV.BOROS_COLLATERAL_ADDRESS as `0x${string}` | undefined;
+        const depositAmountEth = ENV.BOROS_DEPOSIT_AMOUNT_ETH ?? "0.5";
 
         if (!marketAddress || !collateralAddress) {
             throw new Error("[BOROS] Missing BOROS_MARKET_ADDRESS or BOROS_COLLATERAL_ADDRESS");
@@ -589,7 +594,7 @@ export class KyuteAgent {
                 functionName: "decimals",
             });
 
-            const [, answer, , updatedAt, ] = await this.client.readContract({
+            const [, answer, , updatedAt,] = await this.client.readContract({
                 address: CHAINLINK_ETH_USD_FEED,
                 abi: AGGREGATOR_V3_ABI,
                 functionName: "latestRoundData",
@@ -665,7 +670,7 @@ export class KyuteAgent {
     }
 
     private async captureAutomationProofIfPresent() {
-        const txHash = process.env.CHAINLINK_AUTOMATION_TX_HASH;
+        const txHash = ENV.CHAINLINK_AUTOMATION_TX_HASH;
         if (!txHash || this.lastAutomationTxHashLogged === txHash) return;
 
         this.lastAutomationTxHashLogged = txHash;
@@ -676,12 +681,12 @@ export class KyuteAgent {
             event_type: "chainlink_automation",
             action: "TRIGGER",
             status: txHash,
-            reason: `upkeep=${process.env.CHAINLINK_UPKEEP_ID ?? "n/a"}`,
+            reason: `upkeep=${ENV.CHAINLINK_UPKEEP_ID ?? "n/a"}`,
         });
     }
 
     private async logCcipAuditReceipt(recordHedgeTxHash: `0x${string}`, amount: bigint) {
-        const ccipTxHash = process.env.CHAINLINK_CCIP_TX_HASH ?? null;
+        const ccipTxHash = ENV.CHAINLINK_CCIP_TX_HASH ?? null;
         const messageId = `ccip-${recordHedgeTxHash.slice(2, 14)}`;
 
         console.log(`[CHAINLINK][CCIP] messageId=${messageId} tx=${ccipTxHash ?? "pending"}`);
@@ -693,7 +698,7 @@ export class KyuteAgent {
             status: ccipTxHash ?? `pending:${recordHedgeTxHash}`,
             reason: `messageId=${messageId}`,
             amount_eth: Number(amount) / 1e18,
-            market_address: process.env.CHAINLINK_CCIP_DESTINATION_CHAIN ?? "ethereum-mainnet",
+            market_address: ENV.CHAINLINK_CCIP_DESTINATION_CHAIN ?? "ethereum-mainnet",
         });
     }
 }
