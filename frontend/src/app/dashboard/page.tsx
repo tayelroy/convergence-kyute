@@ -11,11 +11,20 @@ import { useAgentStatus } from "@/hooks/useAgentStatus";
 import { ShieldAlert, Bell, Settings, Wallet } from "lucide-react";
 
 export default function DashboardPage() {
-    const { latest, hedges, aiLogs, loading, error, degraded, warnings, lastUpdated } = useAgentStatus();
-    const hasSnapshotProof = !!latest;
-    const hasAiProof = aiLogs.length > 0;
-    const hasHedgeProof = hedges.length > 0;
-
+    const {
+        latest,
+        hedges,
+        aiLogs,
+        chainlinkAutomation,
+        chainlinkFunctions,
+        chainlinkFeed,
+        chainlinkCcip,
+        loading,
+        error,
+        degraded,
+        warnings,
+        lastUpdated,
+    } = useAgentStatus();
     const borosAprDisplay = loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay    = loading ? "..." : latest ? `${latest.hl_apr.toFixed(2)}%`    : "--";
     const spreadDisplay   = loading ? "..." : latest ? `${(latest.spread_bps / 100).toFixed(2)}%` : "--";
@@ -28,6 +37,8 @@ export default function DashboardPage() {
                 hyperliquidRate={latest?.hl_apr}
                 spreadBps={latest?.spread_bps}
                 degraded={degraded}
+                feedRound={chainlinkFeed[0]?.feed_round}
+                feedPriceUsd={chainlinkFeed[0]?.amount_eth}
             />
 
             <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6 min-h-0">
@@ -115,7 +126,16 @@ export default function DashboardPage() {
 
                     {/* 2. Guardian Controls */}
                     <div className="flex-none">
-                        <GuardianControls latest={latest} aiLogs={aiLogs} hedges={hedges} loading={loading} />
+                        <GuardianControls
+                            latest={latest}
+                            aiLogs={aiLogs}
+                            hedges={hedges}
+                            chainlinkAutomation={chainlinkAutomation}
+                            chainlinkFunctions={chainlinkFunctions}
+                            chainlinkFeed={chainlinkFeed}
+                            chainlinkCcip={chainlinkCcip}
+                            loading={loading}
+                        />
                     </div>
 
                     {/* 3. Yield Alert */}
@@ -135,7 +155,15 @@ export default function DashboardPage() {
 
                     {/* 4. Execution Logs */}
                     <div className="flex-1 min-h-0 relative overflow-hidden">
-                        <ExecutionConsole aiLogs={aiLogs} hedges={hedges} loading={loading} />
+                        <ExecutionConsole
+                            aiLogs={aiLogs}
+                            hedges={hedges}
+                            chainlinkAutomation={chainlinkAutomation}
+                            chainlinkFunctions={chainlinkFunctions}
+                            chainlinkFeed={chainlinkFeed}
+                            chainlinkCcip={chainlinkCcip}
+                            loading={loading}
+                        />
                     </div>
                 </div>
 

@@ -2,20 +2,45 @@
 "use client";
 
 import React from "react";
-import type { AiDecision, AgentSnapshot, HedgeEvent } from "@/hooks/useAgentStatus";
+import type {
+    AiDecision,
+    AgentSnapshot,
+    HedgeEvent,
+    ChainlinkAutomationEvent,
+    ChainlinkFunctionsEvent,
+    ChainlinkFeedEvent,
+    ChainlinkCcipEvent,
+} from "@/hooks/useAgentStatus";
 
 interface GuardianControlsProps {
     latest: AgentSnapshot | null;
     aiLogs: AiDecision[];
     hedges: HedgeEvent[];
+    chainlinkAutomation: ChainlinkAutomationEvent[];
+    chainlinkFunctions: ChainlinkFunctionsEvent[];
+    chainlinkFeed: ChainlinkFeedEvent[];
+    chainlinkCcip: ChainlinkCcipEvent[];
     loading?: boolean;
 }
 
-export function GuardianControls({ latest, aiLogs, hedges, loading = false }: GuardianControlsProps) {
+export function GuardianControls({
+    latest,
+    aiLogs,
+    hedges,
+    chainlinkAutomation,
+    chainlinkFunctions,
+    chainlinkFeed,
+    chainlinkCcip,
+    loading = false,
+}: GuardianControlsProps) {
     const aiTriggerBps = Number(process.env.NEXT_PUBLIC_AI_TRIGGER_BPS ?? "800");
     const hedgeThreshold = Number(process.env.NEXT_PUBLIC_HEDGE_COMPOSITE_THRESHOLD ?? "100");
     const latestAi = aiLogs[0] ?? null;
     const latestHedge = hedges[0] ?? null;
+    const latestAutomation = chainlinkAutomation[0] ?? null;
+    const latestFunctions = chainlinkFunctions[0] ?? null;
+    const latestFeed = chainlinkFeed[0] ?? null;
+    const latestCcip = chainlinkCcip[0] ?? null;
 
     const isActive = !loading && !!latest;
     const statusText = loading ? "STARTING" : isActive ? "ACTIVE" : "WAITING";
@@ -48,6 +73,22 @@ export function GuardianControls({ latest, aiLogs, hedges, loading = false }: Gu
                 <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
                     <span>Latest Hedge</span>
                     <span className="text-white">{latestHedge ? `${Number(latestHedge.amount_eth ?? 0).toFixed(4)} ETH` : "N/A"}</span>
+                </div>
+                <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
+                    <span>Automation Tx</span>
+                    <span className="text-white truncate max-w-[160px]">{latestAutomation?.status ?? "N/A"}</span>
+                </div>
+                <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
+                    <span>Functions Req</span>
+                    <span className="text-white truncate max-w-[160px]">{latestFunctions?.status ?? "N/A"}</span>
+                </div>
+                <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
+                    <span>Feed Round</span>
+                    <span className="text-white">{latestFeed?.feed_round ?? "N/A"}</span>
+                </div>
+                <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
+                    <span>CCIP Tx</span>
+                    <span className="text-white truncate max-w-[160px]">{latestCcip?.status ?? "N/A"}</span>
                 </div>
             </div>
 

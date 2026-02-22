@@ -14,6 +14,10 @@ interface AgentStatusResponse {
     history: unknown[];
     hedges: unknown[];
     aiLogs: unknown[];
+    chainlinkAutomation: unknown[];
+    chainlinkFunctions: unknown[];
+    chainlinkFeed: unknown[];
+    chainlinkCcip: unknown[];
     degraded: boolean;
     warnings: string[];
     generatedAt: string;
@@ -30,6 +34,10 @@ export async function GET() {
             history: [],
             hedges: [],
             aiLogs: [],
+            chainlinkAutomation: [],
+            chainlinkFunctions: [],
+            chainlinkFeed: [],
+            chainlinkCcip: [],
             degraded: true,
             warnings: [],
             generatedAt: new Date().toISOString(),
@@ -51,8 +59,8 @@ export async function GET() {
 
         const supabase = createClient(supabaseUrl, supabaseAnonKey);
 
-        // Run all three queries in parallel
-        const [snapshotsResult, hedgesResult, aiLogsResult] = await Promise.all([
+        // Run all event queries in parallel
+        const [snapshotsResult, hedgesResult, aiLogsResult, automationResult, functionsResult, feedResult, ccipResult] = await Promise.all([
             supabase
                 .from("kyute_events")
                 .select("timestamp, asset_symbol, boros_apr, hl_apr, spread_bps, vault_balance_eth")
@@ -73,18 +81,63 @@ export async function GET() {
                 .eq("event_type", "ai_trigger")
                 .order("timestamp", { ascending: false })
                 .limit(10),
+
+            supabase
+                .from("kyute_events")
+                .select("timestamp, status, reason, action")
+                .eq("event_type", "chainlink_automation")
+                .order("timestamp", { ascending: false })
+                .limit(10),
+
+            supabase
+                .from("kyute_events")
+                .select("timestamp, action, status, spread_bps, risk_score, reason")
+                .eq("event_type", "chainlink_functions")
+                .order("timestamp", { ascending: false })
+                .limit(10),
+
+            supabase
+                .from("kyute_events")
+                .select("timestamp, status, reason, amount_eth, market_address")
+                .eq("event_type", "chainlink_feed")
+                .order("timestamp", { ascending: false })
+                .limit(10),
+
+            supabase
+                .from("kyute_events")
+                .select("timestamp, action, status, reason, market_address, amount_eth")
+                .eq("event_type", "chainlink_ccip")
+                .order("timestamp", { ascending: false })
+                .limit(10),
         ]);
 
         const warnings: string[] = [];
         const snapshots = snapshotsResult.data ?? [];
         const hedges = hedgesResult.data ?? [];
         const aiLogs = aiLogsResult.data ?? [];
+        const chainlinkAutomation = automationResult.data ?? [];
+        const chainlinkFunctions = functionsResult.data ?? [];
+        const chainlinkFeedRaw = feedResult.data ?? [];
+        const chainlinkCcip = ccipResult.data ?? [];
+
+        const chainlinkFeed = chainlinkFeedRaw.map((item) => {
+            const reason = String(item.reason ?? "");
+            const roundMatch = reason.match(/round=(\d+)/);
+            return {
+                ...item,
+                feed_round: roundMatch?.[1],
+            };
+        });
 
         const response: AgentStatusResponse = {
             latest: snapshots[0] ?? null,
             history: snapshots,
             hedges,
             aiLogs,
+            chainlinkAutomation,
+            chainlinkFunctions,
+            chainlinkFeed,
+            chainlinkCcip,
             degraded: false,
             warnings,
             generatedAt: new Date().toISOString(),
@@ -125,6 +178,30 @@ export async function GET() {
             warnings.push(message);
             response.degraded = true;
         }
+        if (automationResult.error) {
+            const message = `[chainlink_automation] ${automationResult.error.message}`;
+            console.error("[AgentStatus] chainlink_automation query failed:", automationResult.error.message);
+            warnings.push(message);
+            response.degraded = true;
+        }
+        if (functionsResult.error) {
+            const message = `[chainlink_functions] ${functionsResult.error.message}`;
+            console.error("[AgentStatus] chainlink_functions query failed:", functionsResult.error.message);
+            warnings.push(message);
+            response.degraded = true;
+        }
+        if (feedResult.error) {
+            const message = `[chainlink_feed] ${feedResult.error.message}`;
+            console.error("[AgentStatus] chainlink_feed query failed:", feedResult.error.message);
+            warnings.push(message);
+            response.degraded = true;
+        }
+        if (ccipResult.error) {
+            const message = `[chainlink_ccip] ${ccipResult.error.message}`;
+            console.error("[AgentStatus] chainlink_ccip query failed:", ccipResult.error.message);
+            warnings.push(message);
+            response.degraded = true;
+        }
 
         return NextResponse.json(response, { status: 200 });
 
@@ -137,6 +214,10 @@ export async function GET() {
                 history: [],
                 hedges: [],
                 aiLogs: [],
+                chainlinkAutomation: [],
+                chainlinkFunctions: [],
+                chainlinkFeed: [],
+                chainlinkCcip: [],
                 degraded: true,
                 warnings: [`Unexpected API error: ${message}`],
                 generatedAt: new Date().toISOString(),

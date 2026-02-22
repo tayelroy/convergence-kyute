@@ -7,6 +7,8 @@ interface TickerTapeProps {
     hyperliquidRate?: number | null;
     spreadBps?: number | null;
     degraded?: boolean;
+    feedRound?: string;
+    feedPriceUsd?: number | null;
 }
 
 interface TickerItemProps {
@@ -45,12 +47,19 @@ export function TickerTape({
     hyperliquidRate = null,
     spreadBps = null,
     degraded = false,
+    feedRound,
+    feedPriceUsd = null,
 }: TickerTapeProps) {
     const items = (
         <>
             <TickerItem symbol={`${assetSymbol} Boros`} price={borosRate} change={0} />
             <TickerItem symbol={`${assetSymbol} HL`} price={hyperliquidRate} change={0} />
             <TickerItem symbol={`${assetSymbol} Spread`} price={spreadBps} change={0} isSpread />
+            <div className="flex items-center px-6 border-r border-[#1a1a1a] text-xs">
+                <span className="font-bold text-[#888] mr-2">LINK Feed</span>
+                <span className="text-white mr-2">{feedPriceUsd == null ? "—" : `$${feedPriceUsd.toFixed(2)}`}</span>
+                <span className="text-[#4bf3a6]">R:{feedRound ?? "—"}</span>
+            </div>
             <div className="flex items-center px-6 text-[#444] text-xs border-r border-[#1a1a1a]">
                 <Activity size={12} className="mr-2" />
                 {borosRate == null ? "LOADING..." : degraded ? "MARKET STATUS: DEGRADED" : "MARKET STATUS: ACTIVE"}

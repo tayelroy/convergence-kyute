@@ -35,6 +35,40 @@ export interface AiDecision {
     action: string;
 }
 
+export interface ChainlinkAutomationEvent {
+    timestamp: string;
+    status: string;
+    reason: string;
+    action: string;
+}
+
+export interface ChainlinkFunctionsEvent {
+    timestamp: string;
+    action: string;
+    status: string;
+    spread_bps: number;
+    risk_score: number;
+    reason: string;
+}
+
+export interface ChainlinkFeedEvent {
+    timestamp: string;
+    status: string;
+    reason: string;
+    amount_eth: number;
+    market_address: string;
+    feed_round?: string;
+}
+
+export interface ChainlinkCcipEvent {
+    timestamp: string;
+    action: string;
+    status: string;
+    reason: string;
+    market_address: string;
+    amount_eth: number;
+}
+
 interface SourceState {
     ok: boolean;
     error: string | null;
@@ -46,6 +80,10 @@ interface AgentStatusResponse {
     history: AgentSnapshot[];
     hedges:  HedgeEvent[];
     aiLogs:  AiDecision[];
+    chainlinkAutomation?: ChainlinkAutomationEvent[];
+    chainlinkFunctions?: ChainlinkFunctionsEvent[];
+    chainlinkFeed?: ChainlinkFeedEvent[];
+    chainlinkCcip?: ChainlinkCcipEvent[];
     degraded?: boolean;
     warnings?: string[];
     generatedAt?: string;
@@ -109,5 +147,9 @@ export function useAgentStatus() {
         history: data?.history ?? [],
         hedges:  data?.hedges  ?? [],
         aiLogs:  data?.aiLogs  ?? [],
+        chainlinkAutomation: data?.chainlinkAutomation ?? [],
+        chainlinkFunctions: data?.chainlinkFunctions ?? [],
+        chainlinkFeed: data?.chainlinkFeed ?? [],
+        chainlinkCcip: data?.chainlinkCcip ?? [],
     };
 }
