@@ -3,15 +3,34 @@
 
 import React, { useMemo, useRef, useEffect } from "react";
 import { Terminal } from "lucide-react";
-import type { AiDecision, HedgeEvent } from "@/hooks/useAgentStatus";
+import type {
+    AiDecision,
+    HedgeEvent,
+    ChainlinkAutomationEvent,
+    ChainlinkFunctionsEvent,
+    ChainlinkFeedEvent,
+    ChainlinkCcipEvent,
+} from "@/hooks/useAgentStatus";
 
 interface ExecutionConsoleProps {
     aiLogs: AiDecision[];
     hedges: HedgeEvent[];
+    chainlinkAutomation: ChainlinkAutomationEvent[];
+    chainlinkFunctions: ChainlinkFunctionsEvent[];
+    chainlinkFeed: ChainlinkFeedEvent[];
+    chainlinkCcip: ChainlinkCcipEvent[];
     loading?: boolean;
 }
 
-export function ExecutionConsole({ aiLogs, hedges, loading = false }: ExecutionConsoleProps) {
+export function ExecutionConsole({
+    aiLogs,
+    hedges,
+    chainlinkAutomation,
+    chainlinkFunctions,
+    chainlinkFeed,
+    chainlinkCcip,
+    loading = false,
+}: ExecutionConsoleProps) {
     const scrollRef = useRef<HTMLDivElement>(null);
 
     const logs = useMemo(() => {
@@ -25,10 +44,30 @@ export function ExecutionConsole({ aiLogs, hedges, loading = false }: ExecutionC
             message: `[BOROS] ${item.status ?? "unknown"} amount=${Number(item.amount_eth ?? 0).toFixed(4)} ETH market=${item.market_address ?? "n/a"}`,
         }));
 
-        return [...aiEntries, ...hedgeEntries]
+        const automationEntries = chainlinkAutomation.map((item) => ({
+            timestamp: item.timestamp,
+            message: `[CHAINLINK][AUTOMATION] tx=${item.status ?? "n/a"} ${item.reason ?? ""}`,
+        }));
+
+        const functionsEntries = chainlinkFunctions.map((item) => ({
+            timestamp: item.timestamp,
+            message: `[CHAINLINK][FUNCTIONS] req=${item.status ?? "n/a"} action=${item.action ?? "n/a"} score=${item.risk_score ?? 0}`,
+        }));
+
+        const feedEntries = chainlinkFeed.map((item) => ({
+            timestamp: item.timestamp,
+            message: `[CHAINLINK][FEED] ${item.reason ?? "ETH/USD"} price=${Number(item.amount_eth ?? 0).toFixed(2)}`,
+        }));
+
+        const ccipEntries = chainlinkCcip.map((item) => ({
+            timestamp: item.timestamp,
+            message: `[CHAINLINK][CCIP] ${item.action ?? "AUDIT_SYNC"} tx=${item.status ?? "pending"} dest=${item.market_address ?? "n/a"}`,
+        }));
+
+        return [...aiEntries, ...hedgeEntries, ...automationEntries, ...functionsEntries, ...feedEntries, ...ccipEntries]
             .sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime())
             .slice(-25);
-    }, [aiLogs, hedges]);
+    }, [aiLogs, hedges, chainlinkAutomation, chainlinkFunctions, chainlinkFeed, chainlinkCcip]);
 
     // Auto-scroll to bottom
     useEffect(() => {
