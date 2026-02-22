@@ -1,0 +1,3 @@
+local-simulation:
+  workflow-name: kyute-agent-local
+  workflow-path: "./main.ts"
