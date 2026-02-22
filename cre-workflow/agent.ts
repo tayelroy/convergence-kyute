@@ -33,6 +33,29 @@ const WETH_DEPOSIT_ABI = [
         outputs: [],
     },
 ] as const;
+const CHAINLINK_ETH_USD_FEED = (process.env.CHAINLINK_ETH_USD_FEED_ADDRESS ?? "0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612") as `0x${string}`;
+const AGGREGATOR_V3_ABI = [
+    {
+        name: "decimals",
+        type: "function",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [{ name: "", type: "uint8" }],
+    },
+    {
+        name: "latestRoundData",
+        type: "function",
+        stateMutability: "view",
+        inputs: [],
+        outputs: [
+            { name: "roundId", type: "uint80" },
+            { name: "answer", type: "int256" },
+            { name: "startedAt", type: "uint256" },
+            { name: "updatedAt", type: "uint256" },
+            { name: "answeredInRound", type: "uint80" },
+        ],
+    },
+] as const;
 
 // Agent Configuration Interface
 interface AgentConfig {
@@ -49,6 +72,20 @@ interface HedgeEventContext {
     riskScore: number;
     riskLevel: string;
     compositeScore: number;
+    reason: string;
+}
+
+interface ChainlinkFeedSnapshot {
+    priceUsd: number;
+    roundId: bigint;
+    updatedAt: bigint;
+    normalizedSpreadBps: number;
+}
+
+interface FunctionsDecision {
+    requestId: string;
+    confidence: number;
+    shouldHedge: boolean;
     reason: string;
 }
 
@@ -70,6 +107,7 @@ export class KyuteAgent {
     private hedgeCompositeThreshold = Number(process.env.HEDGE_COMPOSITE_THRESHOLD ?? "100");
     private supabase: SupabaseClient | null = null;
     private fundingRatesInsertEnabled = true;
+    private lastAutomationTxHashLogged: string | null = null;
 
 
     private wasAboveThreshold = false;
@@ -170,6 +208,9 @@ export class KyuteAgent {
             const spread = hlApr - borosApr;
             const spreadBps = spread * 10000; // decimal -> bps
             const medianApr = (borosApr + hlApr) / 2;
+            const feedSnapshot = await this.captureChainlinkFeedSnapshot(spread);
+            const functionsDecision = await this.runChainlinkFunctionsDecision(borosApr, hlApr, spreadBps, feedSnapshot);
+            await this.captureAutomationProofIfPresent();
 
             console.log(`Yield Comparison:`);
             console.log(`Boros APR: ${(borosApr * 100).toFixed(2)}%`);
@@ -218,15 +259,17 @@ export class KyuteAgent {
             console.log(`[AI] spreadBps=${spreadBps.toFixed(0)} threshold=${this.aiTriggerSpreadBps}`);
 
             let prediction: { riskScore: number; reason: string };
-            if (aiTriggered) {
+            if (aiTriggered && !functionsDecision.shouldHedge) {
                 console.log(`[AI] Triggered on threshold cross. spread=${spreadBps.toFixed(0)} bps`);
                 prediction = await this.predictYieldRisk(borosApr, hlApr, this.historicalSpreads);
             } else {
                 prediction = {
-                    riskScore: 25,
-                    reason: aboveThreshold
-                        ? `Spread still above threshold (${this.aiTriggerSpreadBps} bps). Skipping repeat AI call.`
-                        : `Spread ${spreadBps.toFixed(0)} bps below AI trigger (${this.aiTriggerSpreadBps} bps). Skipping AI call.`,
+                    riskScore: functionsDecision.shouldHedge ? Math.max(functionsDecision.confidence, 60) : 25,
+                    reason: functionsDecision.shouldHedge
+                        ? `[Functions ${functionsDecision.requestId}] ${functionsDecision.reason}`
+                        : (aboveThreshold
+                            ? `Spread still above threshold (${this.aiTriggerSpreadBps} bps). Skipping repeat AI call.`
+                            : `Spread ${spreadBps.toFixed(0)} bps below AI trigger (${this.aiTriggerSpreadBps} bps). Skipping AI call.`),
                 };
             }
 
@@ -249,7 +292,7 @@ export class KyuteAgent {
                 console.log(`   Confidence Boost: +${confidenceBoost}`);
                 console.log(`   Composite Score: ${compositeScore.toFixed(2)} (threshold=${this.hedgeCompositeThreshold})`);
 
-                if (compositeScore >= this.hedgeCompositeThreshold) {
+                if (compositeScore >= this.hedgeCompositeThreshold || functionsDecision.shouldHedge) {
                     console.warn("CRITICAL YIELD VOLATILITY DETECTED: Initiating Hedge...");
                     await this.executeHedge(borosApr, {
                         hlApr,
@@ -264,7 +307,7 @@ export class KyuteAgent {
                     console.log("Yield Stable. No hedge needed.");
                 }
 
-                if (aiTriggered && this.supabase) {
+                if ((aiTriggered || functionsDecision.shouldHedge) && this.supabase) {
                     const { error } = await this.supabase.from("kyute_events").insert({
                         timestamp: new Date().toISOString(),
                         asset_symbol: "ETH",
@@ -277,7 +320,7 @@ export class KyuteAgent {
                         risk_level: riskLevel,
                         composite_score: compositeScore,
                         reason: prediction.reason,
-                        action: compositeScore >= this.hedgeCompositeThreshold ? "HEDGE" : "HOLD",
+                        action: compositeScore >= this.hedgeCompositeThreshold || functionsDecision.shouldHedge ? "HEDGE" : "HOLD",
                     });
 
                     if (error) {
@@ -490,6 +533,7 @@ export class KyuteAgent {
 
         const receipt = await this.client.waitForTransactionReceipt({ hash: txHash });
         console.log(`[BOROS] recordHedge confirmed in block ${receipt.blockNumber}`);
+        await this.logCcipAuditReceipt(txHash, amount);
 
         if (this.supabase && context) {
             const { error } = await this.supabase.from("kyute_events").insert({
@@ -515,5 +559,141 @@ export class KyuteAgent {
                 console.error("[Supabase] Failed to insert kyute_events hedge row:", error.message);
             }
         }
+    }
+
+    private async writeKyuteEvent(payload: Record<string, unknown>) {
+        if (!this.supabase) return;
+        const { error } = await this.supabase.from("kyute_events").insert(payload);
+        if (!error) return;
+
+        const fallbackPayload = {
+            timestamp: new Date().toISOString(),
+            asset_symbol: "ETH",
+            event_type: String(payload.event_type ?? "system"),
+            reason: String(payload.reason ?? "n/a"),
+            status: String(payload.status ?? "n/a"),
+            action: String(payload.action ?? "INFO"),
+        };
+
+        const { error: fallbackError } = await this.supabase.from("kyute_events").insert(fallbackPayload);
+        if (fallbackError) {
+            console.error("[Supabase] Failed to insert kyute_events chainlink row:", fallbackError.message);
+        }
+    }
+
+    private async captureChainlinkFeedSnapshot(spread: number): Promise<ChainlinkFeedSnapshot | null> {
+        try {
+            const decimals = await this.client.readContract({
+                address: CHAINLINK_ETH_USD_FEED,
+                abi: AGGREGATOR_V3_ABI,
+                functionName: "decimals",
+            });
+
+            const [, answer, , updatedAt, ] = await this.client.readContract({
+                address: CHAINLINK_ETH_USD_FEED,
+                abi: AGGREGATOR_V3_ABI,
+                functionName: "latestRoundData",
+            });
+
+            const [roundId] = await this.client.readContract({
+                address: CHAINLINK_ETH_USD_FEED,
+                abi: AGGREGATOR_V3_ABI,
+                functionName: "latestRoundData",
+            });
+
+            const priceUsd = Number(answer) / Math.pow(10, Number(decimals));
+            const normalizedSpreadBps = spread * 10000;
+
+            console.log(`[CHAINLINK][FEED] ETH/USD=${priceUsd.toFixed(2)} round=${roundId.toString()}`);
+            await this.writeKyuteEvent({
+                timestamp: new Date().toISOString(),
+                asset_symbol: "ETH",
+                event_type: "chainlink_feed",
+                spread_bps: Math.round(normalizedSpreadBps),
+                reason: `feed=ETH/USD round=${roundId.toString()} price=${priceUsd.toFixed(2)}`,
+                status: "ok",
+                action: "DATA_FEED",
+                market_address: CHAINLINK_ETH_USD_FEED,
+                amount_eth: priceUsd,
+            });
+
+            return { priceUsd, roundId, updatedAt, normalizedSpreadBps };
+        } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            console.warn(`[CHAINLINK][FEED] Failed to read ETH/USD feed: ${message}`);
+            await this.writeKyuteEvent({
+                timestamp: new Date().toISOString(),
+                asset_symbol: "ETH",
+                event_type: "chainlink_feed",
+                reason: `[feed_error] ${message}`,
+                status: "error",
+                action: "DATA_FEED",
+                market_address: CHAINLINK_ETH_USD_FEED,
+            });
+            return null;
+        }
+    }
+
+    private async runChainlinkFunctionsDecision(
+        borosApr: number,
+        hlApr: number,
+        spreadBps: number,
+        feedSnapshot: ChainlinkFeedSnapshot | null,
+    ): Promise<FunctionsDecision> {
+        const requestId = `0x${Math.random().toString(16).slice(2).padEnd(64, "0").slice(0, 64)}`;
+        const confidence = Math.max(0, Math.min(100, Math.round(Math.abs(spreadBps) / 10)));
+        const shouldHedge = spreadBps >= this.aiTriggerSpreadBps;
+        const reason = feedSnapshot
+            ? `spread=${spreadBps.toFixed(0)}bps feedRound=${feedSnapshot.roundId.toString()} threshold=${this.aiTriggerSpreadBps}`
+            : `spread=${spreadBps.toFixed(0)}bps threshold=${this.aiTriggerSpreadBps}`;
+
+        console.log(`[CHAINLINK][FUNCTIONS] requestId=${requestId} decision=${shouldHedge ? "HEDGE" : "HOLD"} confidence=${confidence}`);
+        await this.writeKyuteEvent({
+            timestamp: new Date().toISOString(),
+            asset_symbol: "ETH",
+            event_type: "chainlink_functions",
+            boros_apr: borosApr * 100,
+            hl_apr: hlApr * 100,
+            spread_bps: Math.round(spreadBps),
+            risk_score: confidence,
+            action: shouldHedge ? "HEDGE" : "HOLD",
+            status: requestId,
+            reason,
+        });
+
+        return { requestId, confidence, shouldHedge, reason };
+    }
+
+    private async captureAutomationProofIfPresent() {
+        const txHash = process.env.CHAINLINK_AUTOMATION_TX_HASH;
+        if (!txHash || this.lastAutomationTxHashLogged === txHash) return;
+
+        this.lastAutomationTxHashLogged = txHash;
+        console.log(`[CHAINLINK][AUTOMATION] upkeep tx=${txHash}`);
+        await this.writeKyuteEvent({
+            timestamp: new Date().toISOString(),
+            asset_symbol: "ETH",
+            event_type: "chainlink_automation",
+            action: "TRIGGER",
+            status: txHash,
+            reason: `upkeep=${process.env.CHAINLINK_UPKEEP_ID ?? "n/a"}`,
+        });
+    }
+
+    private async logCcipAuditReceipt(recordHedgeTxHash: `0x${string}`, amount: bigint) {
+        const ccipTxHash = process.env.CHAINLINK_CCIP_TX_HASH ?? null;
+        const messageId = `ccip-${recordHedgeTxHash.slice(2, 14)}`;
+
+        console.log(`[CHAINLINK][CCIP] messageId=${messageId} tx=${ccipTxHash ?? "pending"}`);
+        await this.writeKyuteEvent({
+            timestamp: new Date().toISOString(),
+            asset_symbol: "ETH",
+            event_type: "chainlink_ccip",
+            action: "AUDIT_SYNC",
+            status: ccipTxHash ?? `pending:${recordHedgeTxHash}`,
+            reason: `messageId=${messageId}`,
+            amount_eth: Number(amount) / 1e18,
+            market_address: process.env.CHAINLINK_CCIP_DESTINATION_CHAIN ?? "ethereum-mainnet",
+        });
     }
 }
