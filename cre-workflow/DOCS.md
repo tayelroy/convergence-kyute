@@ -8,6 +8,7 @@ The workflow in `cre-workflow/` is an automated hedge monitor that:
 2. computes spread and risk,
 3. triggers Boros collateral deposit via `@pendle/sdk-boros` when threshold conditions are met,
 4. records an on-chain audit event by calling `recordHedge(amount)` on `StabilityVault`.
+5. emits Chainlink proof telemetry for Automation, Functions, Data Feed rounds, and CCIP receipt propagation.
 
 The on-chain vault is intentionally simple: custody + audit trail events only.
 
@@ -35,6 +36,13 @@ When score threshold is exceeded:
 - Call vault `recordHedge(amount)` for on-chain proof.
 - Write hedge result to Supabase (`kyute_events` with `event_type = hedge`).
 
+### 4) Chainlink Proof Layer
+
+- **Data Feed:** reads ETH/USD `latestRoundData()` from `CHAINLINK_ETH_USD_FEED_ADDRESS` and writes `event_type = chainlink_feed`.
+- **Functions orchestration:** writes per-cycle request + decision as `event_type = chainlink_functions`.
+- **Automation trigger proof:** if `CHAINLINK_AUTOMATION_TX_HASH` is set, writes `event_type = chainlink_automation` once per tx hash.
+- **CCIP audit receipt:** after successful `recordHedge`, writes `event_type = chainlink_ccip` with message reference and destination chain context.
+
 ## Required Environment Variables
 
 Defined at root `.env`:
@@ -50,6 +58,11 @@ Defined at root `.env`:
 - `HEDGE_COMPOSITE_THRESHOLD`
 - `SUPABASE_URL`
 - `SUPABASE_KEY`
+- `CHAINLINK_ETH_USD_FEED_ADDRESS`
+- `CHAINLINK_AUTOMATION_TX_HASH`
+- `CHAINLINK_UPKEEP_ID`
+- `CHAINLINK_CCIP_TX_HASH`
+- `CHAINLINK_CCIP_DESTINATION_CHAIN`
 
 ## Commands
 

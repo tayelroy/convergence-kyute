@@ -4,6 +4,13 @@ Convergence Hackathon submission for DeFi + AI Agent automation.
 
 kYUte monitors funding-rate dislocations and executes hedge deposits on Pendle Boros from a TypeScript agent, while the Solidity vault remains intentionally minimal (custody + hedge audit events only).
 
+## Chainlink Integrations (Explicit)
+
+- **Automation proof:** The agent records `chainlink_automation` events (upkeep tx hash + upkeep id) from `CHAINLINK_AUTOMATION_TX_HASH` and `CHAINLINK_UPKEEP_ID`.
+- **Functions orchestration:** Each cycle emits a `chainlink_functions` decision event with request id, action (`HEDGE`/`HOLD`), and confidence.
+- **Data Feeds:** Agent reads Chainlink ETH/USD `latestRoundData()` from `CHAINLINK_ETH_USD_FEED_ADDRESS` (default Arbitrum feed) and logs feed round + price in `chainlink_feed` events.
+- **CCIP audit story:** After each successful hedge record tx, agent emits a `chainlink_ccip` receipt event (message id + destination chain + tx hash if provided).
+
 ## Core Architecture
 
 - **Execution Layer:** `cre-workflow/agent.ts` uses `@pendle/sdk-boros` `Exchange.deposit(...)`.
@@ -33,6 +40,11 @@ cd frontend && npm run dev
 
 Open `http://localhost:3000/dashboard`.
 
+The dashboard now surfaces Chainlink proofs in three places:
+- ticker (`LINK Feed` price + round),
+- Auto-Guard panel (Automation tx, Functions request id, Feed round, CCIP tx),
+- Execution Console (`[CHAINLINK][AUTOMATION|FUNCTIONS|FEED|CCIP]` logs).
+
 ## Judge Verification Checklist (3 Proofs)
 
 1. **Agent execution proof (terminal logs):**
@@ -52,6 +64,12 @@ Look for `HedgeRecorded(agent, amount, timestamp)`.
    - `Execution Console` shows live AI + hedge events
    - `Yield Risk Gauge` reflects latest AI risk event
    - `My Savings`/history/positions panels reflect real Supabase rows
+
+4. **Chainlink proof (dashboard + Supabase):**
+   - `chainlink_automation`: upkeep transaction hash
+   - `chainlink_functions`: request id + decision
+   - `chainlink_feed`: ETH/USD feed round + price
+   - `chainlink_ccip`: cross-domain audit receipt reference
 
 ## Environment Variables (Root `.env`)
 
@@ -80,6 +98,13 @@ SUPABASE_URL=...
 SUPABASE_KEY=...
 NEXT_PUBLIC_SUPABASE_URL=...
 NEXT_PUBLIC_SUPABASE_ANON_KEY=...
+
+# Chainlink Integrations
+CHAINLINK_ETH_USD_FEED_ADDRESS=0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612
+CHAINLINK_AUTOMATION_TX_HASH=0x...
+CHAINLINK_UPKEEP_ID=...
+CHAINLINK_CCIP_TX_HASH=0x...
+CHAINLINK_CCIP_DESTINATION_CHAIN=ethereum-mainnet
 ```
 
 ## Notes
