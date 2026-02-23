@@ -114,37 +114,41 @@ export class KyuteAgent {
     private wasAboveThreshold = false;
 
 
-    constructor(config: AgentConfig) {
-        const account = privateKeyToAccount(config.privateKey as `0x${string}`);
+    constructor(
+        rpcUrl: string,
+        privateKey: string,
+        geminiKey?: string,
+        vaultAddress?: string,
+        config?: any
+    ) {
+        console.log("[kyute-agent] Constructor started");
+        this.supabase = process.env.SUPABASE_URL && process.env.SUPABASE_KEY
+            ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY)
+            : null;
+
+        console.log("[kyute-agent] Supabase client initialized");
+        const account = privateKeyToAccount(privateKey as `0x${string}`);
+        console.log("[kyute-agent] Account created");
+
         this.client = createWalletClient({
             account,
             chain: arbitrum,
-            transport: http(config.rpcUrl)
+            transport: http(rpcUrl),
         }).extend(publicActions);
-        this.rpcUrl = config.rpcUrl;
-        this.accountAddress = account.address;
 
-        this.geminiKey = config.geminiKey;
-        this.vaultAddress = config.vaultAddress;
+        console.log("[kyute-agent] Wallet client defined");
+        this.rpcUrl = rpcUrl; // Keep rpcUrl for other methods
+        this.accountAddress = account.address; // Keep accountAddress for other methods
+        this.vaultAddress = vaultAddress || "0x0000000000000000000000000000000000000000";
+        this.geminiKey = geminiKey || ""; // Initialize geminiKey
 
-        try {
-            const borosPublicClient = require("@pendle/sdk-boros/dist/entities/publicClient");
-            borosPublicClient.publicClient = createPublicClient({
-                chain: arbitrum,
-                transport: http(this.rpcUrl),
-            });
-        } catch (error) {
-            const msg = error instanceof Error ? error.message : String(error);
-            console.warn(`[BOROS] Could not override SDK public client: ${msg}`);
+        if (geminiKey) {
+            console.log("[kyute-agent] Initializing Gemini");
+            this.genAI = new GoogleGenerativeAI(geminiKey);
+            this.model = this.genAI.getGenerativeModel({ model: "gemini-3.0-flash-preview" }); // Revert to original model name
         }
 
-        try {
-            this.exchange = new Exchange(this.client as any, this.accountAddress, 0, [this.rpcUrl]);
-        } catch (error) {
-            this.exchange = null;
-            const msg = error instanceof Error ? error.message : String(error);
-            console.warn(`[BOROS] SDK initialization failed: ${msg}`);
-        }
+        // Pendle initialization block has been removed for the WASM mock simulation since `require` is unsupported.
 
         // Initialize Gemini AI if key is present
         if (this.geminiKey) {
@@ -181,10 +185,10 @@ export class KyuteAgent {
     }
 
     async executeWorkflow(): Promise<string> {
-        const timestamp = new Date().toLocaleTimeString();
-        console.log(`\n--- kyute Workflow [${timestamp}] ---`);
-
         try {
+            const timestamp = new Date().toISOString();
+            console.log(`\n--- kyute Workflow [${timestamp}] ---`);
+            console.log("[kyute-agent] Phase 1 - Fetching Yield Data");
             // 1. Fetch Yield Data (Oracle Capability)
             let borosApr = 0;
             let hlApr = 0;
@@ -359,10 +363,10 @@ export class KyuteAgent {
             }
 
             return "SUCCESS - Workflow execution completed.";
-        } catch (error) {
+        } catch (error: any) {
             console.error("Agent Workflow Error:", error);
-            const msg = error instanceof Error ? error.message : String(error);
-            return `ERROR - ${msg}`;
+            const msg = error?.stack || error?.message || String(error);
+            return `FAILED - ${msg}`;
         }
     }
 
