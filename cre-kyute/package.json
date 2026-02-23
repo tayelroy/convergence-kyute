@@ -6,5 +6,9 @@
     "@google/generative-ai": "latest",
     "@pendle/sdk-boros": "latest",
     "viem": "latest"
+  },
+  "devDependencies": {
+    "dotenv": "^17.3.1",
+    "ts-node": "^10.9.2"
   }
 }

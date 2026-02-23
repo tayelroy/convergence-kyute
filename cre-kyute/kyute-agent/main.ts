@@ -3,9 +3,13 @@ import {
   consensusIdenticalAggregation,
   handler,
   Runner,
+  HTTPClient,
+  EVMClient,
+  type HTTPSendRequester,
   type NodeRuntime,
   type Runtime,
 } from "@chainlink/cre-sdk"
+import { encodeAbiParameters } from "viem"
 
 type Config = {
   schedule: string
@@ -21,62 +25,81 @@ type AgentResult = {
   detail: string
 }
 
-// 1. We make this fully async again
-const runKyuteAgent = async (nodeRuntime: NodeRuntime<Config>): Promise<AgentResult> => {
-  const {
-    rpcUrl = "http://127.0.0.1:8545",
-    privateKey,
-    geminiKey,
-    vaultAddress
-  } = nodeRuntime.config;
+const askGemini = (requester: HTTPSendRequester, config: Config) => {
+  // Note: The ideal state is to fetch boros/hl spreads natively in CRE or inside askGemini
+  // But aligning to the Blueprint provided.
+  const payload = {
+    contents: [{ parts: [{ text: "Spread is 5.5%. As a DeFi risk analyst, should we hedge? Return JSON with boolean 'hedge' and 'confidence' score." }] }],
+    // Force Gemini to return strictly parsable JSON
+    generationConfig: { responseMimeType: "application/json" }
+  };
 
-  if (!privateKey || !vaultAddress) {
-    return { status: "SKIPPED", detail: "Missing configuration variables." };
-  }
+  // Use the native HTTP POST capability
+  const response = requester.sendRequest({
+    url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${config.geminiKey}`,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    // CRE RequestJson expects body to be a string (base64 encoded bytes in protobuf JSON mapping)
+    body: Buffer.from(JSON.stringify(payload)).toString("base64")
+  }).result();
 
-  try {
-    // 2. Await the dynamic import
-    const { KyuteAgent } = await import("../agent.js");
-
-    const agent = new KyuteAgent({
-      rpcUrl,
-      privateKey,
-      geminiKey,
-      vaultAddress,
-    });
-
-    // 3. Await the actual heavy lifting! 
-    // This blocks the Chainlink node from moving on until the AI is done.
-    const agentSummary = await agent.executeWorkflow();
-
-    // 4. Return strictly serialized strings
-    return {
-      status: "COMPLETED",
-      detail: agentSummary,
-    };
-  } catch (error) {
-    return {
-      status: "FAILED",
-      detail: error instanceof Error ? error.message : String(error),
-    };
-  }
+  // Parse the REST response cleanly
+  const jsonStr = new TextDecoder().decode(response.body);
+  const data = JSON.parse(jsonStr);
+  const aiText = data.candidates[0].content.parts[0].text;
+  return JSON.parse(aiText); // Returns: { hedge: true, confidence: 85 }
 }
 
-const onCronTrigger = async (runtime: Runtime<Config>): Promise<AgentResult> => {
-  runtime.log("Kyute workflow trigger fired. Awaiting Decentralized Consensus...");
+const onCronTrigger = (runtime: Runtime<Config>) => {
+  const http = new HTTPClient();
 
-  // 5. THE CRITICAL AWAIT: We must await the runInNodeMode call itself
-  // Notice the `await` before runtime and the `()` before `.result()`
-  const result = await runtime
-    .runInNodeMode(
-      runKyuteAgent,
-      consensusIdenticalAggregation<AgentResult>(),
-    )()
-    .result();
+  // 1. Await Gemini via Native Consensus. The engine natively knows how to wait for this!
+  const aiDecision = http.sendRequest(
+    runtime,
+    askGemini,
+    consensusIdenticalAggregation()
+  )(runtime.config).result();
 
-  // 6. If we reach here, the network agreed on the AI's action!
-  runtime.log(`Network Consensus Reached: ${result.status} - ${result.detail}`);
-  return result;
+  if (aiDecision.hedge && aiDecision.confidence > 80) {
+    runtime.log(`AI Approved Hedge. Confidence: ${aiDecision.confidence}%. Executing...`);
+
+    if (!runtime.config.vaultAddress) {
+      runtime.log("vaultAddress is missing in config");
+      return "FAILED: Missing vaultAddress";
+    }
+
+    // 2. Encode the AI's decision into bytes
+    const reportBytes = encodeAbiParameters(
+      [{ type: 'bool' }, { type: 'uint256' }],
+      [aiDecision.hedge, BigInt(aiDecision.confidence)]
+    );
+
+    // Convert hex string (0x...) from viem to a byte string base64 for the native request payload
+    const reportData = Buffer.from(reportBytes.slice(2), "hex").toString("base64");
+
+    // 3. Cryptographically sign the report across the DON
+    // The Runtime expects the report context in a ReportRequest/ReportRequestJson mapping
+    const signedReport = runtime.report({ encodedPayload: reportData }).result();
+
+    // 4. Submit to Arbitrum via Native EVM Capability
+    // 4949039107694359620n is 'ethereum-mainnet-arbitrum-1'
+    const evmClient = new EVMClient(4949039107694359620n);
+
+    // The API actually requires hex string or Uint8Array for the receiver depending on the version
+    const receiver = new Uint8Array(Buffer.from(runtime.config.vaultAddress.slice(2), "hex"));
+
+    const tx = evmClient.writeReport(runtime, {
+      $report: true,
+      receiver,
+      report: signedReport
+    }).result();
+
+    runtime.log("Hedge Executed! TX Sent to Network");
+  } else {
+    runtime.log(`AI Rejected Hedge or Confidence too low. Decision: ${aiDecision.hedge}, Confidence: ${aiDecision.confidence}%`);
+  }
+
+  return "SUCCESS";
 }
 
 const initWorkflow = (config: Config) => {
