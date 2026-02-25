@@ -5,6 +5,7 @@ import {
   Runner,
   HTTPClient,
   EVMClient,
+  hexToBase64,
   type HTTPSendRequester,
   type Runtime,
 } from "@chainlink/cre-sdk"
@@ -131,10 +132,17 @@ Return ONLY a JSON object: { "riskScore": number, "reason": "string", "hedge": b
     generationConfig: { responseMimeType: "application/json" },
   }
 
+  if (!config.geminiKey) {
+    throw new Error("Missing geminiKey in config!")
+  }
+
   const response = requester.sendRequest({
-    url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${config.geminiKey}`,
+    url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": config.geminiKey
+    },
     body: Buffer.from(JSON.stringify(payload)).toString("base64"),
     cacheSettings: {
       store: true,
@@ -144,8 +152,17 @@ Return ONLY a JSON object: { "riskScore": number, "reason": "string", "hedge": b
 
   const jsonStr = new TextDecoder().decode(response.body)
   const data = JSON.parse(jsonStr)
+
+  if (!data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+    throw new Error(`Gemini API Error: ${jsonStr}`)
+  }
+
   const aiText = data.candidates[0].content.parts[0].text
-  return JSON.parse(aiText) as { riskScore: number; reason: string; hedge: boolean }
+
+  // Clean markdown code blocks if the model wrapped the JSON
+  const cleanJson = aiText.replace(/```json/gi, "").replace(/```/g, "").trim()
+
+  return JSON.parse(cleanJson) as { riskScore: number; reason: string; hedge: boolean }
 }
 
 // ─── Workflow Orchestration ─────────────────────────────────────────────────
@@ -227,8 +244,12 @@ const onCronTrigger = (runtime: Runtime<Config>) => {
     [BigInt(aiDecision.riskScore), BigInt(Math.round(spreadBps)), true],
   )
 
-  const reportData = Buffer.from(reportBytes.slice(2), "hex").toString("base64")
-  const signedReport = runtime.report({ encodedPayload: reportData }).result()
+  const signedReport = runtime.report({
+    encodedPayload: hexToBase64(reportBytes),
+    encoderName: "evm",
+    signingAlgo: "ecdsa",
+    hashingAlgo: "keccak256",
+  }).result()
 
   // Submit to Arbitrum (chain selector 4949039107694359620n)
   const evmClient = new EVMClient(4949039107694359620n)
