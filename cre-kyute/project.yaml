@@ -25,12 +25,18 @@
 
 # ==========================================================================
 staging-settings:
-  rpcs:
-    - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
-
-# ==========================================================================
+  experimental-chains:
+    - chain-selector: 42161
+      rpc-url: https://arb-mainnet.g.alchemy.com/v2/ALCHEMY_API_KEY
+      forwarder: "0x0000000000000000000000000000000000000000"
+  # rpcs:
+  #   - chain-name: arbitrum-mainnet
+  #     url: https://arb-mainnet.g.alchemy.com/v2/ALCHEMY_API_KEY
 production-settings:
-  rpcs:
-    - chain-name: ethereum-testnet-sepolia
-      url: https://ethereum-sepolia-rpc.publicnode.com
+  experimental-chains:
+    - chain-selector: 4949039107694359620
+      rpc-url: https://arb-mainnet.g.alchemy.com/v2/ALCHEMY_API_KEY
+      forwarder: "0x0000000000000000000000000000000000000000"
+rpcs:
+    - chain-name: arbitrum
+      url: https://arb-mainnet.g.alchemy.com/v2/ALCHEMY_API_KEY

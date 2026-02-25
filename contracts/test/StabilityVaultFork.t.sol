@@ -17,8 +17,13 @@ contract StabilityVaultForkTest is Test {
     }
 
     function testRecordHedgeEmitsEvent() public {
-        vm.expectEmit(true, false, false, true, address(vault));
-        emit StabilityVault.HedgeRecorded(agent, 0.5 ether, block.timestamp);
+        vm.expectEmit(false, false, false, true, address(vault));
+        emit StabilityVault.ExecutionIntentAuthorized(
+            "LONG",
+            0.5 ether,
+            100,
+            block.timestamp
+        );
 
         vm.prank(agent);
         vault.recordHedge(0.5 ether);

@@ -5,6 +5,7 @@ import {
   Runner,
   HTTPClient,
   EVMClient,
+  hexToBase64,
   type HTTPSendRequester,
   type Runtime,
 } from "@chainlink/cre-sdk"
@@ -14,51 +15,50 @@ import { encodeAbiParameters } from "viem"
 
 type Config = {
   schedule: string
-  geminiKey: string
   vaultAddress: string
-  supabaseUrl: string
-  supabaseKey: string
-  borosMarketAddress: string
+  supabaseUrl?: string // Now optional since we use Binance
+  borosMarketAddress?: string // Now optional
   aiTriggerSpreadBps: number
-  hedgeCompositeThreshold: number
+  hedgeCompositeThreshold?: number // Deprecated but might be provided
   coin: string
 }
 
-// ─── Phase 1a: Read Boros APR from Supabase ─────────────────────────────────
+// ─── Phase 1a: Fetch Binance Funding Rate ───────────────────────────────
 
 /**
- * Read the latest Boros implied APR from Supabase (pushed by boros-fetcher.ts).
- * Uses PostgREST GET endpoint: /rest/v1/boros_rates?order=timestamp.desc&limit=1
- * Returns the implied APR as a decimal (e.g. 0.085 for 8.5%).
+ * Fetch the current funding rate from Binance for the given symbol (ETHUSDT).
+ * GET https://fapi.binance.com/fapi/v1/premiumIndex?symbol=ETHUSDT
+ * Returns annualized funding rate as a decimal.
+ * Binance settles every 8 hours, so rate * 3 * 365.
  */
-const readBorosAprFromSupabase = (requester: HTTPSendRequester, config: Config) => {
-  const url = `${config.supabaseUrl}/rest/v1/boros_rates?market_address=eq.${config.borosMarketAddress}&order=timestamp.desc&limit=1`
+const fetchBinanceFundingRate = (requester: HTTPSendRequester) => {
+  const url = "https://fapi.binance.com/fapi/v1/premiumIndex?symbol=ETHUSDT"
 
   const response = requester.sendRequest({
     url,
     method: "GET",
     headers: {
       "Content-Type": "application/json",
-      apikey: config.supabaseKey,
-      Authorization: `Bearer ${config.supabaseKey}`,
     },
     body: "",
     cacheSettings: {
       store: true,
-      maxAge: "60s",
+      maxAge: "30s",
     },
   }).result()
 
   const jsonStr = new TextDecoder().decode(response.body)
-  const rows = JSON.parse(jsonStr) as Array<{ implied_apr: number; timestamp: string }>
+  const data = JSON.parse(jsonStr)
 
-  if (!rows.length) {
-    throw new Error("No Boros rate found in Supabase. Is boros-fetcher.ts running?")
+  if (!data?.lastFundingRate) {
+    throw new Error(`Binance API Error: ${jsonStr}`)
   }
 
-  // implied_apr is stored as percentage in Supabase → convert to decimal
-  return rows[0].implied_apr / 100
+  const fundingRate = Number(data.lastFundingRate)
+  // Annualize: rate × 3 (8-hour intervals) × 365 days
+  return fundingRate * 3 * 365
 }
+
 
 // ─── Phase 1b: Fetch Hyperliquid Funding Rate ───────────────────────────────
 
@@ -100,52 +100,72 @@ const fetchHyperliquidFundingRate = (requester: HTTPSendRequester, config: Confi
 // ─── Phase 2: AI Decision (Gemini) ──────────────────────────────────────────
 
 /**
- * Ask Gemini to assess reversion risk for the yield spread.
- * Only called when spreadBps >= aiTriggerSpreadBps.
+ * Ask Gemini to assess reversion risk for the yield spread and suggest leverage/direction.
  */
 const askGemini = (
   requester: HTTPSendRequester,
-  borosApr: number,
+  binanceApr: number,
   hlApr: number,
   spreadBps: number,
-  config: Config,
+  geminiKey: string,
 ) => {
-  const spread = (hlApr - borosApr) * 100
+  const spread = (hlApr - binanceApr) * 100
+  const isHLLower = hlApr < binanceApr
 
-  const prompt = `You are a DeFi Risk Analyst AI.
+  const prompt = `You are an institutional DeFi Quant AI managing a Vault.
 
-Market Data:
-- Boros Implied APR (Arbitrum): ${(borosApr * 100).toFixed(2)}%
+Market Data for ETH-Perp:
+- Binance Funding Rate (Annualized): ${(binanceApr * 100).toFixed(2)}%
 - Hyperliquid Funding Rate (Annualized): ${(hlApr * 100).toFixed(2)}%
-- Spread (HL - Boros): ${spread.toFixed(2)}%
-- Spread (bps): ${spreadBps.toFixed(0)} bps
+- Spread (HL - Binance): ${spread.toFixed(2)}%
+- Absolute Spread (bps): ${spreadBps.toFixed(0)} bps
 
 Context:
-Hyperliquid often leads Boros by 1-3%. A spread > 3% suggests arbitrageurs will sell on HL and buy on Boros, crushing Boros yields.
+Significant divergence in funding rates between major venues like Binance and Hyperliquid suggests a temporary market inefficiency. 
+- If Hyperliquid's rate is significantly lower than Binance's, going LONG on Hyperliquid captures the return-to-mean as the rates converge.
+- If Hyperliquid's rate is significantly higher, going SHORT on Hyperliquid captures the return-to-mean.
 
-Task: Predict reversion risk (0-100) and whether hedging is advisable.
-Return ONLY a JSON object: { "riskScore": number, "reason": "string", "hedge": boolean }`
+Task:
+Evaluate the reversion opportunity. Provide a target "direction" (LONG, SHORT, or HOLD), a recommended "leverage" factor (from 1 to 3), and a confidence score (0-100). 
+${isHLLower ? "Since Hyperliquid is currently lower than Binance, the reversion target should typically be LONG." : "Since Hyperliquid is currently higher than Binance, the reversion target should typically be SHORT."}
+Return ONLY a JSON object: { "direction": "LONG" | "SHORT" | "HOLD", "leverage": number, "confidence": number, "reason": "string" }`
 
   const payload = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: { responseMimeType: "application/json" },
   }
 
+  if (!geminiKey) {
+    throw new Error("Missing geminiKey from secrets!")
+  }
+
   const response = requester.sendRequest({
-    url: `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${config.geminiKey}`,
+    url: "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      "x-goog-api-key": geminiKey
+    },
     body: Buffer.from(JSON.stringify(payload)).toString("base64"),
     cacheSettings: {
       store: true,
-      maxAge: "3600s",
+      maxAge: "10s",
     },
   }).result()
 
   const jsonStr = new TextDecoder().decode(response.body)
   const data = JSON.parse(jsonStr)
+
+  if (!data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+    throw new Error(`Gemini API Error: ${jsonStr}`)
+  }
+
   const aiText = data.candidates[0].content.parts[0].text
-  return JSON.parse(aiText) as { riskScore: number; reason: string; hedge: boolean }
+
+  // Clean markdown code blocks if the model wrapped the JSON
+  const cleanJson = aiText.replace(/```json/gi, "").replace(/```/g, "").trim()
+
+  return JSON.parse(cleanJson) as { direction: string; leverage: number; confidence: number; reason: string }
 }
 
 // ─── Workflow Orchestration ─────────────────────────────────────────────────
@@ -154,15 +174,18 @@ const onCronTrigger = (runtime: Runtime<Config>) => {
   const http = new HTTPClient()
   const config = runtime.config
 
-  // ── Phase 1: Fetch yield data ─────────────────────────────────────────
-  runtime.log("Phase 1: Fetching yield data...")
+  // Read secrets from the CRE vault
+  const geminiApiKey = runtime.getSecret({ id: "GEMINI_API_KEY" }).result().value
 
-  // 1a. Read Boros APR from Supabase (pushed by boros-fetcher.ts)
-  const borosApr = http.sendRequest(
+  // ── Phase 1: Fetch yield data ─────────────────────────────────────────
+  runtime.log("Phase 1: Fetching yield data from Binance and Hyperliquid...")
+
+  // 1a. Fetch Binance funding rate via REST
+  const binanceApr = http.sendRequest(
     runtime,
-    readBorosAprFromSupabase,
+    fetchBinanceFundingRate,
     consensusIdenticalAggregation(),
-  )(config).result()
+  )().result()
 
   // 1b. Fetch Hyperliquid funding rate via REST
   const hlApr = http.sendRequest(
@@ -171,64 +194,61 @@ const onCronTrigger = (runtime: Runtime<Config>) => {
     consensusIdenticalAggregation(),
   )(config).result()
 
-  const spread = hlApr - borosApr
-  const spreadBps = spread * 10000
+  const spread = hlApr - binanceApr
+  const spreadBps = Math.abs(spread) * 10000
 
-  runtime.log(`Boros APR (from Supabase): ${(borosApr * 100).toFixed(2)}%`)
+  runtime.log(`Binance APR: ${(binanceApr * 100).toFixed(2)}%`)
   runtime.log(`Hyperliquid APR: ${(hlApr * 100).toFixed(2)}%`)
-  runtime.log(`Spread: ${(spread * 100).toFixed(2)}% (${spreadBps.toFixed(0)} bps)`)
+  runtime.log(`Absolute Spread: ${spreadBps.toFixed(0)} bps (Raw Spread: ${(spread * 100).toFixed(2)}%)`)
 
   // ── Phase 2: AI decision (conditional) ────────────────────────────────
   if (spreadBps < config.aiTriggerSpreadBps) {
     runtime.log(
-      `Spread ${spreadBps.toFixed(0)} bps < threshold ${config.aiTriggerSpreadBps} bps. No action.`,
+      `Absolute Spread ${spreadBps.toFixed(0)} bps < threshold ${config.aiTriggerSpreadBps} bps. No action.`,
     )
     return "HOLD — Spread below AI trigger threshold"
   }
 
   runtime.log(
-    `Phase 2: Spread ${spreadBps.toFixed(0)} bps >= threshold. Calling Gemini AI...`,
+    `Phase 2: Spread ${spreadBps.toFixed(0)} bps >= threshold. Calling Quant AI...`,
   )
 
   const aiDecision = http.sendRequest(
     runtime,
     askGemini,
     consensusIdenticalAggregation(),
-  )(borosApr, hlApr, spreadBps, config).result()
+  )(binanceApr, hlApr, spreadBps, geminiApiKey).result()
 
-  runtime.log(`AI Risk Score: ${aiDecision.riskScore}/100`)
+  runtime.log(`AI Direction: ${aiDecision.direction}`)
+  runtime.log(`AI Leverage: ${aiDecision.leverage}x`)
+  runtime.log(`AI Confidence Score: ${aiDecision.confidence}/100`)
   runtime.log(`AI Reason: ${aiDecision.reason}`)
-  runtime.log(`AI Hedge: ${aiDecision.hedge}`)
 
-  // Composite score
-  const spreadTerm = spread * 100
-  const compositeScore = aiDecision.riskScore + spreadTerm
-
-  runtime.log(
-    `Composite Score: ${compositeScore.toFixed(2)} (threshold: ${config.hedgeCompositeThreshold})`,
-  )
-
-  // ── Phase 3: Execute hedge (conditional) ──────────────────────────────
-  if (compositeScore < config.hedgeCompositeThreshold && !aiDecision.hedge) {
-    runtime.log("Composite score below threshold. Holding.")
-    return "HOLD — Composite score below threshold"
+  // ── Phase 3: Execute trade (conditional) ──────────────────────────────
+  if (aiDecision.direction === "HOLD" || aiDecision.confidence < 80) {
+    runtime.log("AI decision is HOLD or confidence below 80. Aborting execution.")
+    return "HOLD — AI rejected execution"
   }
 
-  runtime.log("Phase 3: Executing hedge on StabilityVault...")
+  runtime.log("Phase 3: Emitting Authorized Intent to StabilityVault...")
 
   if (!config.vaultAddress) {
     runtime.log("ERROR: vaultAddress missing in config")
     return "FAILED — Missing vaultAddress"
   }
 
-  // Encode hedge report: (riskScore, spreadBps, shouldHedge)
+  // Encode intent report: (direction, leverage, confidence) -> (string, uint256, uint256)
   const reportBytes = encodeAbiParameters(
-    [{ type: "uint256" }, { type: "uint256" }, { type: "bool" }],
-    [BigInt(aiDecision.riskScore), BigInt(Math.round(spreadBps)), true],
+    [{ type: "string" }, { type: "uint256" }, { type: "uint256" }],
+    [aiDecision.direction, BigInt(aiDecision.leverage), BigInt(aiDecision.confidence)],
   )
 
-  const reportData = Buffer.from(reportBytes.slice(2), "hex").toString("base64")
-  const signedReport = runtime.report({ encodedPayload: reportData }).result()
+  const signedReport = runtime.report({
+    encodedPayload: hexToBase64(reportBytes),
+    encoderName: "evm",
+    signingAlgo: "ecdsa",
+    hashingAlgo: "keccak256",
+  }).result()
 
   // Submit to Arbitrum (chain selector 4949039107694359620n)
   const evmClient = new EVMClient(4949039107694359620n)
@@ -245,9 +265,9 @@ const onCronTrigger = (runtime: Runtime<Config>) => {
     .result()
 
   runtime.log(
-    `Hedge executed! riskScore=${aiDecision.riskScore} spreadBps=${spreadBps.toFixed(0)}`,
+    `Intent authorized! Direction=${aiDecision.direction} Leverage=${aiDecision.leverage}x SpreadBps=${spreadBps.toFixed(0)}`,
   )
-  return "HEDGE EXECUTED"
+  return "INTENT EXECUTED"
 }
 
 // ─── Workflow Init ──────────────────────────────────────────────────────────
