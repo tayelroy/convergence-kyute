@@ -6,6 +6,7 @@
       "name": "typescript-simple-template",
       "dependencies": {
         "@chainlink/cre-sdk": "^1.0.9",
+        "viem": "^2.0.0",
       },
       "devDependencies": {
         "@types/bun": "1.2.21",
