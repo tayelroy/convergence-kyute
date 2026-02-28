@@ -1,0 +1,7 @@
+staging-settings:
+  user-workflow:
+    workflow-name: "kyute-funding-hedge"
+  workflow-artifacts:
+    workflow-path: "./workflow.ts"
+    config-path: "./config.staging.json"
+    secrets-path: "./secrets.yaml"
