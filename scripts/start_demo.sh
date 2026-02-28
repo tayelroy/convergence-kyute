@@ -8,7 +8,7 @@ echo ""
 
 # Adjust this if your directory structure is different
 ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
-CRE_DIR="${ROOT_DIR}/../cre-kyute"
+CRE_DIR="${ROOT_DIR}/../cre-workflow"
 
 # ── 1. Clean Shutdown Trap ────────────────────────
 cleanup() {
@@ -26,10 +26,9 @@ trap cleanup INT TERM
 cd "${CRE_DIR}"
 
 # ── 2. Boot the Data Sidecar ──────────────────────
-echo "[1/2] Booting Boros Fetcher sidecar..."
-bun run boros-fetcher.ts &
-FETCHER_PID=$!
-echo "   ✓ Sidecar running in background (PID: ${FETCHER_PID})"
+# Note: Boros fetcher was removed from the new spec as we read from subgraph directly,
+# so we can skip booting the sidecar in this demo.
+echo "[1/2] Skipping legacy Boros Fetcher sidecar..."
 echo ""
 
 # Give the sidecar 5 seconds to complete its first fetch and populate Supabase
@@ -47,9 +46,9 @@ while true; do
     echo "[$(date +'%T')] Triggering CRE Execution..."
     echo "======================================================"
 
-    # Run the native CRE simulator. 
-    # The --broadcast flag ensures EVMClient transactions actually fire!
-    cre workflow simulate ./kyute-agent --target=staging-settings --broadcast
+    # Run the native CRE simulator on the new workflow
+    # It points to the kyute-funding-hedge folder that implements the new v1.0 spec
+    cre workflow simulate ./kyute-funding-hedge --target=staging-settings
 
     echo ""
     echo "Workflow complete."
