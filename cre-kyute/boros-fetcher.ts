@@ -37,6 +37,8 @@ async function pushBorosRate() {
     console.log(`[boros-fetcher] Fetching Boros APR for market ${MARKET_ADDRESS}...`)
 
     let impliedApr: number
+    let hlApr: number
+
     try {
         impliedApr = await fetchBorosImpliedApr(MARKET_ADDRESS)
     } catch (err: any) {
@@ -44,33 +46,64 @@ async function pushBorosRate() {
         return
     }
 
-    const row = {
+    try {
+        // Fetch raw predicted funding from API
+        const payload = JSON.stringify({ type: "predictedFundings" })
+        const response = await fetch("https://api.hyperliquid.xyz/info", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: payload
+        })
+        const data = await response.json()
+        const coinData = data.find((item: any) => item[0] === "ETH")
+        if (!coinData) {
+            hlApr = 0
+        } else {
+            const hlPerpEntry = venues.find((v: any) => v[0] === "HlPerp")
+            hlApr = hlPerpEntry ? Number(hlPerpEntry[1].funding) * 24 * 365 : 0
+        }
+    } catch (err: any) {
+        console.error(`[boros-fetcher] HL fetch failed: ${err.message}`)
+        return
+    }
+
+    const rowBoros = {
         timestamp: new Date().toISOString(),
         market_address: MARKET_ADDRESS,
         implied_apr: impliedApr * 100, // store as percentage
     }
 
-    console.log(`[boros-fetcher] Boros APR: ${row.implied_apr.toFixed(4)}%`)
+    const rowHl = {
+        timestamp: new Date().toISOString(),
+        source: "Hyperliquid",
+        asset: "ETH",
+        apr: hlApr * 100 // store as percentage
+    }
 
-    const { error } = await supabase.from("boros_rates").insert(row)
+    console.log(`[boros-fetcher] Boros APR: ${rowBoros.implied_apr.toFixed(4)}% | HL APR: ${rowHl.apr.toFixed(4)}%`)
+
+    await supabase.from("boros_rates").insert(rowBoros)
+    const { error: errorHl } = await supabase.from("funding_rates").insert(rowHl)
 
     if (error) {
         // If table doesn't exist, log instructions
         if (error.message.includes("boros_rates")) {
-            console.error(`[boros-fetcher] Table "boros_rates" not found. Create it:`)
-            console.error(`  CREATE TABLE boros_rates (
-    id bigint generated always as identity primary key,
-    timestamp timestamptz not null default now(),
-    market_address text not null,
-    implied_apr numeric not null
-  );`)
+            console.error(`[boros-fetcher] Table "boros_rates" not found.`)
         } else {
             console.error(`[boros-fetcher] Supabase insert failed: ${error.message}`)
+        }
+    }
+
+    if (errorHl) {
+        if (errorHl.message.includes("funding_rates")) {
+            console.error(`[boros-fetcher] Table "funding_rates" not found. Create it.`)
+        } else {
+            console.error(`[boros-fetcher] Supabase HL insert failed: ${errorHl.message}`)
         }
         return
     }
 
-    console.log(`[boros-fetcher] ✓ Pushed to Supabase at ${row.timestamp}`)
+    console.log(`[boros-fetcher] ✓ Pushed to Supabase at ${rowBoros.timestamp}`)
 }
 
 // ─── Main Loop ──────────────────────────────────────────────────────────────
