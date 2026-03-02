@@ -18,15 +18,20 @@ type Config = {
   vaultAddress: string;
   borosRouterAddress: string;
   coin: string;
+  borosMarketAddress?: string;
+  borosCoreApiUrl?: string;
 };
 
-const onCronTrigger = (runtime: Runtime<Config>) => {
+const onCronTrigger = async (runtime: Runtime<Config>) => {
   const http = new HTTPClient();
   const config = runtime.config;
 
   // 1. Fetch
   const hlApr = http.sendRequest(runtime, fetchHyperliquidFundingHistory, consensusIdenticalAggregation())(config.coin).result();
-  const borosApr = http.sendRequest(runtime, fetchBorosImpliedApr, consensusIdenticalAggregation())(config.coin).result();
+  const borosApr = await fetchBorosImpliedApr(config.coin, {
+    marketAddress: config.borosMarketAddress,
+    coreApiUrl: config.borosCoreApiUrl,
+  });
 
   runtime.log(`HL APR: ${(hlApr * 100).toFixed(2)}%`);
   runtime.log(`Boros APR: ${(borosApr * 100).toFixed(2)}%`);

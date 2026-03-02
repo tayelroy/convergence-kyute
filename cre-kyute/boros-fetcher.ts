@@ -40,7 +40,10 @@ async function pushBorosRate() {
     let hlApr: number
 
     try {
-        impliedApr = await fetchBorosImpliedApr(MARKET_ADDRESS)
+        impliedApr = await fetchBorosImpliedApr("ETH", {
+            marketAddress: MARKET_ADDRESS,
+            coreApiUrl: process.env.BOROS_CORE_API_URL,
+        })
     } catch (err: any) {
         console.error(`[boros-fetcher] SDK fetch failed: ${err.message}`)
         return
@@ -59,6 +62,7 @@ async function pushBorosRate() {
         if (!coinData) {
             hlApr = 0
         } else {
+            const venues = coinData[1] as any[]
             const hlPerpEntry = venues.find((v: any) => v[0] === "HlPerp")
             hlApr = hlPerpEntry ? Number(hlPerpEntry[1].funding) * 24 * 365 : 0
         }
@@ -82,15 +86,15 @@ async function pushBorosRate() {
 
     console.log(`[boros-fetcher] Boros APR: ${rowBoros.implied_apr.toFixed(4)}% | HL APR: ${rowHl.apr.toFixed(4)}%`)
 
-    await supabase.from("boros_rates").insert(rowBoros)
+    const { error: errorBoros } = await supabase.from("boros_rates").insert(rowBoros)
     const { error: errorHl } = await supabase.from("funding_rates").insert(rowHl)
 
-    if (error) {
+    if (errorBoros) {
         // If table doesn't exist, log instructions
-        if (error.message.includes("boros_rates")) {
+        if (errorBoros.message.includes("boros_rates")) {
             console.error(`[boros-fetcher] Table "boros_rates" not found.`)
         } else {
-            console.error(`[boros-fetcher] Supabase insert failed: ${error.message}`)
+            console.error(`[boros-fetcher] Supabase insert failed: ${errorBoros.message}`)
         }
     }
 
