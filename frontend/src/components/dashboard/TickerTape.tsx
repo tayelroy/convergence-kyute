@@ -6,20 +6,22 @@ interface TickerTapeProps {
     borosRate?: number | null;
     hyperliquidRate?: number | null;
     spreadBps?: number | null;
+    borosChangePct?: number | null;
+    hlChangePct?: number | null;
+    spreadChangePct?: number | null;
     degraded?: boolean;
-    feedRound?: string;
-    feedPriceUsd?: number | null;
 }
 
 interface TickerItemProps {
     symbol: string;
     price: number | null | undefined;
-    change: number;
+    change?: number | null;
     isSpread?: boolean;
 }
 
 function TickerItem({ symbol, price, change, isSpread }: TickerItemProps) {
-    const isPositive = change >= 0;
+    const hasChange = typeof change === "number" && Number.isFinite(change);
+    const isPositive = hasChange ? change >= 0 : true;
     const displayPrice =
         price == null
             ? "—"
@@ -33,10 +35,14 @@ function TickerItem({ symbol, price, change, isSpread }: TickerItemProps) {
             <span className={isSpread ? "text-blue-400" : "text-white"}>
                 {displayPrice}
             </span>
-            <div className={`flex items-center text-xs ${isPositive ? "text-[#00ff00]" : "text-[#ff0000]"}`}>
-                {isPositive ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                <span className="ml-1">{Math.abs(change).toFixed(2)}%</span>
-            </div>
+            {hasChange ? (
+                <div className={`flex items-center text-xs ${isPositive ? "text-[#00ff00]" : "text-[#ff0000]"}`}>
+                    {isPositive ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
+                    <span className="ml-1">{Math.abs(change as number).toFixed(2)}%</span>
+                </div>
+            ) : (
+                <div className="text-xs text-[#666]">--</div>
+            )}
         </div>
     );
 }
@@ -46,20 +52,16 @@ export function TickerTape({
     borosRate = null,
     hyperliquidRate = null,
     spreadBps = null,
+    borosChangePct = null,
+    hlChangePct = null,
+    spreadChangePct = null,
     degraded = false,
-    feedRound,
-    feedPriceUsd = null,
 }: TickerTapeProps) {
     const items = (
         <>
-            <TickerItem symbol={`${assetSymbol} Boros`} price={borosRate} change={0} />
-            <TickerItem symbol={`${assetSymbol} HL`} price={hyperliquidRate} change={0} />
-            <TickerItem symbol={`${assetSymbol} Spread`} price={spreadBps} change={0} isSpread />
-            <div className="flex items-center px-6 border-r border-[#1a1a1a] text-xs">
-                <span className="font-bold text-[#888] mr-2">LINK Feed</span>
-                <span className="text-white mr-2">{feedPriceUsd == null ? "—" : `$${feedPriceUsd.toFixed(2)}`}</span>
-                <span className="text-[#4bf3a6]">R:{feedRound ?? "—"}</span>
-            </div>
+            <TickerItem symbol={`${assetSymbol} Boros`} price={borosRate} change={borosChangePct} />
+            <TickerItem symbol={`${assetSymbol} HL`} price={hyperliquidRate} change={hlChangePct} />
+            <TickerItem symbol={`${assetSymbol} Spread`} price={spreadBps} change={spreadChangePct} isSpread />
             <div className="flex items-center px-6 text-[#444] text-xs border-r border-[#1a1a1a]">
                 <Activity size={12} className="mr-2" />
                 {borosRate == null ? "LOADING..." : degraded ? "MARKET STATUS: DEGRADED" : "MARKET STATUS: ACTIVE"}

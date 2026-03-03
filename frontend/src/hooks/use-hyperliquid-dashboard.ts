@@ -1,0 +1,270 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import { useActiveAccount } from "thirdweb/react";
+import { getCachedWalletAddress, setCachedWalletAddress } from "@/lib/hl-wallet-cache";
+
+type PositionPoint = {
+  timestamp: number;
+  totalOpen: number;
+};
+
+type DashboardState = {
+  loading: boolean;
+  error: string | null;
+  midPrice: number | null;
+  hlFundingApr: number | null;
+  hlSpreadBps: number | null;
+  borosImpliedApr: number | null;
+  midChangePct: number | null;
+  totalOpenNow: number;
+  historyPoints: PositionPoint[];
+};
+
+const isTestnet = () => {
+  const raw = process.env.NEXT_PUBLIC_HL_TESTNET;
+  if (!raw) return true;
+  return raw.toLowerCase() === "true";
+};
+
+const relayInfo = async (payload: Record<string, unknown>, testnet: boolean): Promise<unknown> => {
+  const res = await fetch("/api/hyperliquid/relay", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      kind: "info",
+      testnet,
+      payload,
+    }),
+  });
+  const body = (await res.json()) as { ok: boolean; status?: number; data?: unknown; error?: string };
+  if (!res.ok || !body.ok) {
+    throw new Error(`relay info failed http=${res.status} upstream=${body.status ?? "n/a"} ${body.error ?? ""}`);
+  }
+  return body.data;
+};
+
+const toNumber = (v: unknown): number | null => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n : null;
+};
+
+const firstLevelPx = (side: unknown): number | null => {
+  if (!Array.isArray(side) || side.length === 0) return null;
+  const level = side[0] as unknown;
+  if (Array.isArray(level)) return toNumber(level[0]);
+  if (typeof level === "object" && level !== null) {
+    const row = level as { px?: string | number; p?: string | number };
+    return toNumber(row.px ?? row.p);
+  }
+  return null;
+};
+
+const parseSpreadBpsFromL2Book = (data: unknown): number | null => {
+  const root = data as { levels?: [unknown, unknown] } | undefined;
+  const levels = root?.levels;
+  if (!Array.isArray(levels) || levels.length < 2) return null;
+  const bestBid = firstLevelPx(levels[0]);
+  const bestAsk = firstLevelPx(levels[1]);
+  if (bestBid == null || bestAsk == null || bestBid <= 0 || bestAsk <= 0 || bestAsk < bestBid) return null;
+  const mid = (bestBid + bestAsk) / 2;
+  if (!Number.isFinite(mid) || mid <= 0) return null;
+  return ((bestAsk - bestBid) / mid) * 10_000;
+};
+
+const parseCurrentOpenFromClearinghouse = (data: unknown, coin = "ETH"): number => {
+  const root = data as { assetPositions?: Array<{ position?: { coin?: string; szi?: string | number } }> } | undefined;
+  const arr = root?.assetPositions;
+  if (!Array.isArray(arr)) return 0;
+  return arr.reduce((acc, row) => {
+    const c = String(row?.position?.coin ?? "");
+    if (c !== coin) return acc;
+    const szi = Number(row?.position?.szi ?? 0);
+    if (!Number.isFinite(szi)) return acc;
+    return acc + Math.abs(szi);
+  }, 0);
+};
+
+const cacheKey = (address: string) => `hl_dashboard_points_${address.toLowerCase()}`;
+
+const inferWalletFromSessionCache = (): string | null => {
+  if (typeof window === "undefined") return null;
+  try {
+    for (let i = 0; i < window.sessionStorage.length; i += 1) {
+      const key = window.sessionStorage.key(i);
+      if (!key) continue;
+      if (!key.startsWith("hl_dashboard_points_")) continue;
+      const address = key.replace("hl_dashboard_points_", "").trim();
+      if (/^0x[a-fA-F0-9]{40}$/.test(address)) return address.toLowerCase();
+    }
+  } catch {
+    // ignore storage access issues
+  }
+  return null;
+};
+
+const fetchPersistedSeries = async (wallet: string, testnet: boolean): Promise<PositionPoint[]> => {
+  const qs = new URLSearchParams({
+    wallet,
+    coin: "ETH",
+    testnet: testnet ? "true" : "false",
+  });
+  const response = await fetch(`/api/position-history?${qs.toString()}`);
+  const body = (await response.json()) as { ok: boolean; points?: Array<{ timestamp: string; total_open: number }>; error?: string };
+  if (!response.ok || !body.ok) {
+    throw new Error(body.error ?? `position-history failed (${response.status})`);
+  }
+  return (body.points ?? [])
+    .map((p) => ({
+      timestamp: new Date(p.timestamp).getTime(),
+      totalOpen: Number(p.total_open),
+    }))
+    .filter((p) => Number.isFinite(p.timestamp) && Number.isFinite(p.totalOpen));
+};
+
+export function useHyperliquidDashboard() {
+  const account = useActiveAccount();
+  const [state, setState] = useState<DashboardState>({
+    loading: true,
+    error: null,
+    midPrice: null,
+    hlFundingApr: null,
+    hlSpreadBps: null,
+    borosImpliedApr: null,
+    midChangePct: null,
+    totalOpenNow: 0,
+    historyPoints: [],
+  });
+
+  useEffect(() => {
+    let cancelled = false;
+    const testnet = isTestnet();
+
+    const run = async () => {
+      const connectedWallet = account?.address?.toLowerCase();
+      const cachedWallet = getCachedWalletAddress();
+      const inferredWallet = inferWalletFromSessionCache();
+      const wallet = connectedWallet || cachedWallet || inferredWallet;
+      setCachedWalletAddress(connectedWallet);
+
+      // Hydrate from cached points to avoid blank graph during hard refreshes.
+      if (wallet) {
+        try {
+          const raw = sessionStorage.getItem(cacheKey(wallet));
+          if (raw) {
+            const cached = JSON.parse(raw) as PositionPoint[];
+            if (Array.isArray(cached) && cached.length > 0) {
+              setState((s) => ({
+                ...s,
+                historyPoints: cached,
+                totalOpenNow: cached[cached.length - 1].totalOpen,
+              }));
+            }
+          }
+        } catch {
+          // ignore cache parse errors
+        }
+      }
+
+      setState((s) => ({ ...s, loading: true, error: null }));
+
+      try {
+        const [midsRaw, metaCtxRaw, ratesSyncRaw, l2BookRaw] = await Promise.all([
+          relayInfo({ type: "allMids" }, testnet),
+          relayInfo({ type: "metaAndAssetCtxs" }, testnet),
+          fetch("/api/rates-sync").then(async (res) => {
+            const body = (await res.json()) as {
+              ok: boolean;
+              error?: string;
+              funding?: { funding_apr?: number };
+              boros?: { implied_apr?: number };
+            };
+            if (!res.ok || !body.ok) {
+              throw new Error(body.error ?? `rates-sync failed (${res.status})`);
+            }
+            return body;
+          }),
+          relayInfo({ type: "l2Book", coin: "ETH" }, false),
+        ]);
+
+        const mids = midsRaw as Record<string, string>;
+        const midPrice = toNumber(mids.ETH);
+
+        const [, assetCtxs] = metaCtxRaw as [
+          { universe: Array<{ name: string }> },
+          Array<{ markPx?: string; prevDayPx?: string }>,
+        ];
+        const [meta] = metaCtxRaw as [{ universe: Array<{ name: string }> }, unknown[]];
+        const ethIndex = meta.universe.findIndex((u) => u.name === "ETH");
+        const ethCtx = ethIndex >= 0 ? assetCtxs[ethIndex] : undefined;
+        const mark = toNumber(ethCtx?.markPx);
+        const prev = toNumber(ethCtx?.prevDayPx);
+        const midChangePct = mark != null && prev != null && prev > 0 ? ((mark - prev) / prev) * 100 : null;
+
+        const hlFundingApr = toNumber(ratesSyncRaw.funding?.funding_apr);
+        const hlSpreadBps = parseSpreadBpsFromL2Book(l2BookRaw);
+        const borosImpliedApr = toNumber(ratesSyncRaw.boros?.implied_apr);
+        let historyPoints: PositionPoint[] = [];
+        let totalOpenNow = 0;
+
+        if (wallet) {
+          const [persistedResult, clearinghouseResult] = await Promise.allSettled([
+            fetchPersistedSeries(wallet, testnet),
+            relayInfo({ type: "clearinghouseState", user: wallet }, testnet),
+          ]);
+          if (persistedResult.status === "fulfilled") {
+            historyPoints = persistedResult.value;
+          }
+          if (clearinghouseResult.status === "fulfilled") {
+            const currentOpen = parseCurrentOpenFromClearinghouse(clearinghouseResult.value, "ETH");
+            if (historyPoints.length === 0 && currentOpen > 0) {
+              historyPoints = [{ timestamp: Date.now(), totalOpen: currentOpen }];
+            }
+            totalOpenNow =
+              currentOpen > 0
+                ? currentOpen
+                : historyPoints.length > 0
+                ? historyPoints[historyPoints.length - 1].totalOpen
+                : 0;
+          } else {
+            totalOpenNow = historyPoints.length > 0 ? historyPoints[historyPoints.length - 1].totalOpen : 0;
+          }
+
+          try {
+            sessionStorage.setItem(cacheKey(wallet), JSON.stringify(historyPoints));
+          } catch {
+            // ignore storage failures
+          }
+        }
+
+        if (!cancelled) {
+          setState({
+            loading: false,
+            error: null,
+            midPrice,
+            hlFundingApr,
+            hlSpreadBps,
+            borosImpliedApr,
+            midChangePct,
+            totalOpenNow,
+            historyPoints,
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Failed to fetch Hyperliquid dashboard data";
+        if (!cancelled) {
+          setState((s) => ({ ...s, loading: false, error: message }));
+        }
+      }
+    };
+
+    void run();
+    const id = setInterval(() => void run(), 30_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [account?.address]);
+
+  return useMemo(() => state, [state]);
+}
