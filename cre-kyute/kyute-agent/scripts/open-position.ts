@@ -89,6 +89,7 @@ async function run() {
   const oracleDeviationBps = asNumber("HL_ORACLE_DEVIATION_BPS", process.env.HL_ORACLE_DEVIATION_BPS, 100);
   const reduceOnly = asBool(process.env.HL_REDUCE_ONLY, false);
   const isTestnet = asBool(process.env.HL_TESTNET, false);
+  const leverage = process.env.HL_LEVERAGE ? asNumber("HL_LEVERAGE", process.env.HL_LEVERAGE) : null;
 
   console.log(`Using private key from ${privateKeySource}`);
 
@@ -100,6 +101,20 @@ async function run() {
   const infoClient = new InfoClient({
     transport: new HttpTransport({ isTestnet }),
   });
+
+  const [meta] = await infoClient.metaAndAssetCtxs();
+  const assetIndex = meta.universe.findIndex((u) => u.name.toUpperCase() === asset);
+  if (assetIndex < 0) {
+    throw new Error(`Unknown asset ${asset} on ${isTestnet ? "testnet" : "mainnet"}`);
+  }
+
+  if (leverage !== null) {
+    await exchangeClient.updateLeverage({
+      asset: assetIndex,
+      isCross: true,
+      leverage,
+    });
+  }
 
   const event = await execute_perp_order({
     asset,
