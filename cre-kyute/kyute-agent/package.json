@@ -4,11 +4,14 @@
   "main": "dist/main.js",
   "private": true,
   "scripts": {
-    "postinstall": "bun x cre-setup"
+    "postinstall": "bun x cre-setup",
+    "open-position": "bun run scripts/open-position.ts",
+    "show-assets": "bun run scripts/show-assets.ts"
   },
   "license": "UNLICENSED",
   "dependencies": {
     "@chainlink/cre-sdk": "^1.0.9",
+    "@nktkas/hyperliquid": "^0.32.1",
     "viem": "^2.0.0"
   },
   "devDependencies": {

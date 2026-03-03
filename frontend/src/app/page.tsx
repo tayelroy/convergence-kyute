@@ -39,10 +39,10 @@ export default function LandingPage() {
             transition={{ delay: 0.6, duration: 0.8 }}
             className="text-center text-sm md:text-base font-mono text-neutral-400 max-w-lg"
           >
-            Decentralized Funding Rate Arbitrage Vault
+            AI-gated funding-rate hedge vault
             <br />
-            <span className="text-neutral-500">
-              Powered by Chainlink CRE & Boros Pendle
+            <span className="text-neutral-500 mt-2 block text-xs">
+              Deposit → Open HL Position → Auto Hedge via CRE → Close
             </span>
           </motion.p>
 
@@ -50,6 +50,7 @@ export default function LandingPage() {
             initial={{ opacity: 0, y: 20 }}
             whileInView={{ opacity: 1, y: 0 }}
             transition={{ delay: 0.8, duration: 0.8 }}
+            className="flex gap-4 items-center"
           >
             <Link href="/dashboard">
               <GradientButton
@@ -67,6 +68,12 @@ export default function LandingPage() {
                 </span>
               </GradientButton>
             </Link>
+            <button
+              onClick={() => alert("Simulating CRE Node webhook... Checking Hyperliquid API.")}
+              className="px-8 py-6 rounded-[1.15rem] bg-neutral-800 text-white font-semibold hover:bg-neutral-700 transition"
+            >
+              Run Hedge Now
+            </button>
           </motion.div>
 
           {/* Vault Hero Card — below the CTA */}

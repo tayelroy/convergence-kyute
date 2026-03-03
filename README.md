@@ -1,114 +1,47 @@
-# kYUte | Autonomous Yield Guardian
+# kYUte Project Specification (v1.0)
 
-Convergence Hackathon submission for DeFi + AI Agent automation.
+**Goal:** One-click, AI-gated funding-rate hedge for Hyperliquid traders using Pendle Boros + Chainlink CRE.
 
-kYUte monitors funding-rate dislocations and executes hedge deposits on Pendle Boros from a TypeScript agent, while the Solidity vault remains intentionally minimal (custody + hedge audit events only).
+## 1. Product Overview
+**Name:** kYUte  
+**Tagline:** Deposit once. Trade on Hyperliquid like normal. Let AI + Boros + CRE silently hedge your funding pain.  
 
-## Chainlink Integrations (Explicit)
+Users deposit collateral into the kYUte Vault. They open/close Hyperliquid perpetual positions exactly as they would on the real app. Behind the scenes, CRE runs an hourly AI prediction and automatically opens the opposite Boros YU position **only** when the predicted floating funding is more expensive than the Boros implied yield. When the user closes on Hyperliquid, everything unwinds atomically.
 
-- **Automation proof:** The agent records `chainlink_automation` events (upkeep tx hash + upkeep id) from `CHAINLINK_AUTOMATION_TX_HASH` and `CHAINLINK_UPKEEP_ID`.
-- **Functions orchestration:** Each cycle emits a `chainlink_functions` decision event with request id, action (`HEDGE`/`HOLD`), and confidence.
-- **Data Feeds:** Agent reads Chainlink ETH/USD `latestRoundData()` from `CHAINLINK_ETH_USD_FEED_ADDRESS` (default Arbitrum feed) and logs feed round + price in `chainlink_feed` events.
-- **CCIP audit story:** After each successful hedge record tx, agent emits a `chainlink_ccip` receipt event (message id + destination chain + tx hash if provided).
+## 2. Core Components
 
-## Core Architecture
+### 1) Smart Contracts (`contracts/src/kYUteVault.sol`)
+ERC-4626 Vault deployed on Arbitrum.
+- Handles user deposits
+- Enforces max 10% TVL cap per hedge
+- `executeHedge` callback restricted to `onlyCRE`
+- Integrates `borosRouter` for Pendle YU positions
 
-- **Execution Layer:** `cre-workflow/agent.ts` uses `@pendle/sdk-boros` `Exchange.deposit(...)`.
-- **On-chain Vault:** `contracts/src/StabilityVault.sol` holds ETH, accepts deposits, and emits `HedgeRecorded` via `recordHedge`.
-- **Environment:** Arbitrum One **mainnet fork** via Anvil.
-- **Telemetry:** Live events in Supabase (`kyute_events`, `funding_rates`) rendered by Next.js dashboard.
+### 2) Chainlink CRE Workflow (`cre-workflow/kyute-funding-hedge`)
+Verifiable execution logic using `@chainlink/cre-sdk`.
+- `fetchData`: Gathers past 72h funding from Hyperliquid API + Boros implied APR
+- `predictAndDecide`: Evaluates AI model for spread divergence 
+- `callback`: Yields a signed mock zkp payload containing hedge execution commands to the Vault
 
-## Judge Quick Start (One Command)
+### 3) Frontend Dashboard (`frontend/src/app`)
+Next.js UI to track hedge positions, live APR differences, and proof hashes.
+- To run: `cd frontend && npm install && npm run dev`
+- To run hedge locally: Click "Run Hedge Now" simulated webhook
 
+## Judge Quick Start (Simulation)
+1. **Run CRE Node**:
 ```bash
-bash scripts/start_demo.sh
+cd cre-workflow/kyute-funding-hedge
+bun install
+cre run --mode=node
 ```
 
-This script:
-1. forks Arbitrum One locally,
-2. deploys `StabilityVault`,
-3. updates root `.env`,
-4. funds the vault,
-5. prepares WETH collateral,
-6. starts the agent heartbeat.
-
-In another terminal, run the frontend:
-
+2. **Run Frontend**:
 ```bash
-cd frontend && npm run dev
+cd frontend
+npm install
+npm run dev
 ```
 
-Open `http://localhost:3000/dashboard`.
-
-The dashboard now surfaces Chainlink proofs in three places:
-- ticker (`LINK Feed` price + round),
-- Auto-Guard panel (Automation tx, Functions request id, Feed round, CCIP tx),
-- Execution Console (`[CHAINLINK][AUTOMATION|FUNCTIONS|FEED|CCIP]` logs).
-
-## Judge Verification Checklist (3 Proofs)
-
-1. **Agent execution proof (terminal logs):**
-   - `[BOROS] Market resolved`
-   - `[BOROS] Deposit submitted successfully`
-   - `[BOROS] recordHedge confirmed`
-
-2. **On-chain proof (vault event):**
-
-```bash
-cast logs --rpc-url http://127.0.0.1:8545 --address <STABILITY_VAULT_ADDRESS>
-```
-
-Look for `HedgeRecorded(agent, amount, timestamp)`.
-
-3. **Dashboard proof (live telemetry):**
-   - `Execution Console` shows live AI + hedge events
-   - `Yield Risk Gauge` reflects latest AI risk event
-   - `My Savings`/history/positions panels reflect real Supabase rows
-
-4. **Chainlink proof (dashboard + Supabase):**
-   - `chainlink_automation`: upkeep transaction hash
-   - `chainlink_functions`: request id + decision
-   - `chainlink_feed`: ETH/USD feed round + price
-   - `chainlink_ccip`: cross-domain audit receipt reference
-
-## Environment Variables (Root `.env`)
-
-```env
-# AI
-GEMINI_API_KEY=...
-AI_TRIGGER_SPREAD_BPS=800
-HEDGE_COMPOSITE_THRESHOLD=100
-
-# Local fork runtime
-ANVIL_RPC_URL=http://127.0.0.1:8545
-RPC_URL=http://127.0.0.1:8545
-ANVIL_PRIVATE_KEY=0x...
-PRIVATE_KEY=0x...
-
-# Vault
-STABILITY_VAULT_ADDRESS=0x...
-
-# Boros
-BOROS_MARKET_ADDRESS=0x8db1397beb16a368711743bc42b69904e4e82122
-BOROS_COLLATERAL_ADDRESS=0x82af49447d8a07e3bd95bd0d56f35241523fbab1
-BOROS_DEPOSIT_AMOUNT_ETH=0.05
-
-# Supabase
-SUPABASE_URL=...
-SUPABASE_KEY=...
-NEXT_PUBLIC_SUPABASE_URL=...
-NEXT_PUBLIC_SUPABASE_ANON_KEY=...
-
-# Chainlink Integrations
-CHAINLINK_ETH_USD_FEED_ADDRESS=0x639Fe6ab55C921f74e7fac1ee960C0B6293ba612
-CHAINLINK_AUTOMATION_TX_HASH=0x...
-CHAINLINK_UPKEEP_ID=...
-CHAINLINK_CCIP_TX_HASH=0x...
-CHAINLINK_CCIP_DESTINATION_CHAIN=ethereum-mainnet
-```
-
-## Notes
-
-- DeFi execution logic lives in TypeScript agent code, not in the vault.
-- The vault intentionally does **not** call Pendle Router functions.
-- If Boros/AI/Supabase upstreams fail, the system logs explicit failure states instead of fabricating data.
+## Environment Variables
+See `.env.example`. Make sure you configure the target Vault Addresses and RPC endpoints.
