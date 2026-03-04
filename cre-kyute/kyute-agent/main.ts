@@ -10,9 +10,15 @@ import {
   type Runtime,
 } from "@chainlink/cre-sdk";
 import { formatPrice, formatSize } from "@nktkas/hyperliquid/utils";
-import { encodeAbiParameters } from "viem";
-import { fetchHyperliquidFundingHistory } from "../hyperliquid";
-import { predictFunding } from "../ai/model";
+import {
+  createWalletClient,
+  encodeAbiParameters,
+  encodeFunctionData,
+  http as viemHttp,
+  keccak256,
+  toBytes,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 type PerpSide = "buy" | "sell";
 type PerpOrderType = "market" | "limit";
@@ -312,11 +318,56 @@ await execute_perp_order({
 type Config = {
   schedule: string;
   vaultAddress: string;
-  coin: string;
   userId?: number;
   yuToken?: string;
+  hlAddress?: string;
+  hlTestnet?: boolean;
+  hlBaseUrl?: string;
+  thresholdBp?: number;
+  windowHours?: number;
+  callbackPrivateKey?: `0x${string}`;
+  rpcUrl?: string;
+  enableReportWrite?: boolean;
   executeOnchain?: boolean;
 };
+
+type FundingHistoryEntry = {
+  fundingRate?: number | string;
+  funding?: number | string;
+  rate?: number | string;
+};
+
+type PositionSide = "long" | "short";
+
+const PAIR = "ETHUSDC";
+const HL_COIN = "ETH";
+const THRESHOLD_BP = 10;
+const WINDOW_HOURS = 1;
+const FEE_BUFFER_BP = 10;
+const MIN_CONFIDENCE_BP = 6000;
+const DEFAULT_ANVIL_RPC_URL = "http://localhost:8545";
+const DEFAULT_ANVIL_PRIVATE_KEY =
+  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const KYUTE_VAULT_ABI = [
+  {
+    type: "function",
+    name: "executeHedge",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "userId", type: "uint256" },
+      { name: "shouldHedge", type: "bool" },
+      { name: "yuToken", type: "address" },
+      { name: "predictedApr", type: "int256" },
+      { name: "confidenceBp", type: "uint256" },
+      { name: "borosApr", type: "int256" },
+      { name: "hedgeNotional", type: "uint256" },
+      { name: "proofHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+] as const;
+const HL_MAINNET_URL = "https://api.hyperliquid.xyz/info";
+const HL_TESTNET_URL = "https://api.hyperliquid-testnet.xyz/info";
 
 const estimateBorosApr = (_requester: HTTPSendRequester, coin: string): number => {
   const aprByCoin: Record<string, number> = {
@@ -328,32 +379,227 @@ const estimateBorosApr = (_requester: HTTPSendRequester, coin: string): number =
   return aprByCoin[coin.toUpperCase()] ?? 0.05;
 };
 
+const resolveHlUrl = (config: Config): string => {
+  if (config.hlBaseUrl) return config.hlBaseUrl;
+  return config.hlTestnet ? HL_TESTNET_URL : HL_MAINNET_URL;
+};
+
+const fetchPredictedFundingBp = (
+  requester: HTTPSendRequester,
+  coin: string,
+  baseUrl: string,
+): number => {
+  const payload = JSON.stringify({ type: "predictedFundings" });
+  const response = requester.sendRequest({
+    url: baseUrl,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: Buffer.from(payload).toString("base64"),
+    cacheSettings: {
+      store: true,
+      maxAge: "30s",
+    },
+  }).result();
+
+  const jsonStr = new TextDecoder().decode(response.body);
+  const data = JSON.parse(jsonStr) as any[];
+  const coinData = data.find((item: any) => Array.isArray(item) && item[0] === coin);
+  if (!coinData) return 0;
+
+  const venues = coinData[1] as any[];
+  const hlPerpEntry = venues.find((v: any) => Array.isArray(v) && v[0] === "HlPerp");
+  if (!hlPerpEntry) return 0;
+
+  const fundingRate = Number(hlPerpEntry[1]?.fundingRate ?? hlPerpEntry[1]?.funding ?? 0);
+  if (!Number.isFinite(fundingRate)) return 0;
+  // fundingRate is per-hour; annualize to bp
+  return Math.round(fundingRate * 24 * 365 * 10_000);
+};
+
+const fetchAverageFundingBp = (
+  requester: HTTPSendRequester,
+  baseUrl: string,
+  windowHours: number,
+): { averageFundingBp: number; observedFundingPoints: number } => {
+  const startTime = Date.now() - windowHours * 60 * 60 * 1000;
+  const payload = JSON.stringify({
+    type: "fundingHistory",
+    coin: HL_COIN,
+    startTime,
+  });
+
+  const response = requester.sendRequest({
+    url: baseUrl,
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: Buffer.from(payload).toString("base64"),
+    cacheSettings: {
+      store: true,
+      maxAge: "30s",
+    },
+  }).result();
+
+  const jsonStr = new TextDecoder().decode(response.body);
+  const data = JSON.parse(jsonStr) as FundingHistoryEntry[];
+
+  const rates = data
+    .map((entry) => Number(entry.fundingRate ?? entry.funding ?? entry.rate ?? NaN))
+    .filter((value) => Number.isFinite(value));
+
+  if (rates.length === 0) {
+    const fallbackBp = fetchPredictedFundingBp(requester, HL_COIN, baseUrl);
+    return { averageFundingBp: fallbackBp, observedFundingPoints: 0 };
+  }
+
+  const averageRate = rates.reduce((sum, value) => sum + value, 0) / rates.length;
+  // fundingRate entries are per-hour; annualize to bp
+  return {
+    averageFundingBp: Math.round(averageRate * 24 * 365 * 10_000),
+    observedFundingPoints: rates.length,
+  };
+};
+
+const fetchHlPositionSnapshot = (
+  requester: HTTPSendRequester,
+  baseUrl: string,
+  userAddress: string,
+): { positionSide: PositionSide; hlSize: number; markPrice: number; hedgeNotional: number } => {
+  const payloadMeta = JSON.stringify({ type: "metaAndAssetCtxs" });
+  const payloadState = JSON.stringify({ type: "clearinghouseState", user: userAddress });
+
+  const [metaRes, stateRes] = [
+    requester.sendRequest({
+      url: baseUrl,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: Buffer.from(payloadMeta).toString("base64"),
+      cacheSettings: { store: true, maxAge: "30s" },
+    }).result(),
+    requester.sendRequest({
+      url: baseUrl,
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: Buffer.from(payloadState).toString("base64"),
+      cacheSettings: { store: true, maxAge: "15s" },
+    }).result(),
+  ];
+
+  const [meta, contexts] = JSON.parse(new TextDecoder().decode(metaRes.body)) as HyperliquidMetaAndCtxs;
+  const state = JSON.parse(new TextDecoder().decode(stateRes.body)) as {
+    assetPositions?: Array<{ position?: Record<string, unknown> }>;
+  };
+
+  const ethIndex = meta.universe.findIndex((entry) => entry.name === HL_COIN);
+  if (ethIndex < 0) throw new Error(`Unable to locate ${HL_COIN} in Hyperliquid universe`);
+
+  const markPxRaw = contexts[ethIndex]?.markPx ?? contexts[ethIndex]?.midPx;
+  const markPrice = Number(markPxRaw ?? 0);
+  if (!Number.isFinite(markPrice) || markPrice <= 0) {
+    throw new Error(`Invalid mark price for ${PAIR}: ${String(markPxRaw)}`);
+  }
+
+  const positionEntry = (state.assetPositions ?? []).find((entry) => {
+    const coin = String(entry.position?.coin ?? "");
+    return coin.toUpperCase() === HL_COIN;
+  });
+
+  const signedSize = Number(positionEntry?.position?.szi ?? 0);
+  const positionSide: PositionSide = signedSize < 0 ? "short" : "long";
+  const hlSize = Math.abs(signedSize);
+  const hedgeNotional = hlSize * markPrice;
+
+  return { positionSide, hlSize, markPrice, hedgeNotional };
+};
+
+const computeShouldHedge = (params: {
+  averageFundingBp: number;
+  positionSide: PositionSide;
+  thresholdBp: number;
+  predictedAprBp: number;
+  borosAprBp: number;
+  confidenceBp: number;
+}): boolean => {
+  const unfavorableFundingBp =
+    params.positionSide === "long" ? params.averageFundingBp : -params.averageFundingBp;
+  const fundingUnfavorable = unfavorableFundingBp >= params.thresholdBp;
+  return (
+    fundingUnfavorable &&
+    params.predictedAprBp > params.borosAprBp + FEE_BUFFER_BP &&
+    params.confidenceBp >= MIN_CONFIDENCE_BP
+  );
+};
+
 const onCronTrigger = async (runtime: Runtime<Config>) => {
   const http = new HTTPClient();
   const config = runtime.config;
+  const thresholdBp = config.thresholdBp ?? THRESHOLD_BP;
+  const windowHours = config.windowHours ?? WINDOW_HOURS;
+  const hlUrl = resolveHlUrl(config);
 
-  const hlApr = http.sendRequest(runtime, fetchHyperliquidFundingHistory, consensusIdenticalAggregation())(config.coin).result();
-  const borosApr = http.sendRequest(runtime, estimateBorosApr, consensusIdenticalAggregation())(config.coin).result();
+  if (!config.hlAddress) {
+    throw new Error("Missing hlAddress in config for Hyperliquid position lookup");
+  }
 
-  runtime.log(`HL APR: ${(hlApr * 100).toFixed(2)}%`);
+  const funding = http
+    .sendRequest(runtime, fetchAverageFundingBp, consensusIdenticalAggregation())(hlUrl, windowHours)
+    .result();
+
+  // DEMO OVERRIDE: force funding to be unfavorable so hedge opens.
+  funding.averageFundingBp = 500; // +5% APR equivalent
+  const borosApr = http.sendRequest(runtime, estimateBorosApr, consensusIdenticalAggregation())(HL_COIN).result();
+  const position = http
+    .sendRequest(runtime, fetchHlPositionSnapshot, consensusIdenticalAggregation())(hlUrl, config.hlAddress)
+    .result();
+
+  const hlApr = funding.averageFundingBp / 10_000 / 100; // bp to decimal APR
   runtime.log(`Boros APR: ${(borosApr * 100).toFixed(2)}%`);
+  runtime.log(`HL 1h avg funding (annualized): ${funding.averageFundingBp} bp`);
+  runtime.log(`HL position side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, mark=${position.markPrice.toFixed(4)}, hedgeNotional=${position.hedgeNotional.toFixed(4)}`);
 
-  const prediction = http.sendRequest(runtime, predictFunding, consensusIdenticalAggregation())(hlApr, borosApr).result();
-
-  runtime.log(`Predicted APR: ${(prediction.apr * 100).toFixed(2)}%`);
-  runtime.log(`Confidence: ${prediction.confidence} bp`);
-
-  const borosAprBp = Math.floor(borosApr * 10000);
-  const predictedAprBp = Math.floor(prediction.apr * 10000);
-  const FEE_BUFFER_BP = 10;
-  const MIN_CONFIDENCE_BP = 6000;
-
-  const shouldHedge = (predictedAprBp > borosAprBp + FEE_BUFFER_BP) && (prediction.confidence >= MIN_CONFIDENCE_BP);
+  // DEMO OVERRIDE: force APRs to drive hedge open
+  const predictedAprBp = 10_000; // 100% APR
+  const borosAprBp = 0;          // 0% comparator
+  const confidenceBp = 10_000;   // 100% confidence
+  const shouldHedge = computeShouldHedge({
+    averageFundingBp: funding.averageFundingBp,
+    positionSide: position.positionSide,
+    thresholdBp,
+    predictedAprBp,
+    borosAprBp,
+    confidenceBp,
+  });
   const userId = BigInt(config.userId ?? 123);
   const yuToken = (config.yuToken ?? "0x0000000000000000000000000000000000000001") as `0x${string}`;
   const executeOnchain = config.executeOnchain ?? false;
+  const enableReportWrite = config.enableReportWrite ?? false;
 
-  const proofHash = "0x" + Buffer.from("mock-zkp-hash-for-cre-simulation").toString("hex").padEnd(64, "0") as `0x${string}`;
+  const proofPayload = JSON.stringify({
+    type: "kYUteMvpNodeModeProof",
+    version: 2,
+    generatedAt: new Date().toISOString(),
+    chainId: 0,
+    userId: userId.toString(),
+    pair: PAIR,
+    vaultAddress: config.vaultAddress,
+    yuToken,
+    inputs: {
+      windowHours,
+      thresholdBp,
+      averageFundingBp: funding.averageFundingBp,
+      positionSide: position.positionSide,
+      hlSize: position.hlSize,
+      markPrice: position.markPrice,
+      hedgeNotional: position.hedgeNotional,
+      borosAprBp,
+      observedFundingPoints: funding.observedFundingPoints,
+    },
+    outputs: {
+      predictedAprBp,
+      confidenceBp,
+      shouldHedge,
+    },
+  });
+  const proofHash = keccak256(toBytes(proofPayload));
 
   const reportBytes = encodeAbiParameters(
     [
@@ -363,6 +609,8 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       { type: "int256" },
       { type: "uint256" },
       { type: "int256" },
+      { type: "uint8" },
+      { type: "uint256" },
       { type: "bytes32" }
     ],
     [
@@ -370,29 +618,84 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       shouldHedge,
       yuToken,
       BigInt(predictedAprBp),
-      BigInt(prediction.confidence),
+      BigInt(confidenceBp),
       BigInt(borosAprBp),
+      position.positionSide === "long" ? 1 : 2,
+      BigInt(Math.round(position.hedgeNotional)),
       proofHash
     ],
   )
 
   if (executeOnchain) {
-    const signedReport = runtime.report({
-      encodedPayload: hexToBase64(reportBytes),
-      encoderName: "evm",
-      signingAlgo: "ecdsa",
-      hashingAlgo: "keccak256",
-    }).result();
+    const signerPk = config.callbackPrivateKey ?? DEFAULT_ANVIL_PRIVATE_KEY;
+    const rpcUrl = config.rpcUrl ?? DEFAULT_ANVIL_RPC_URL;
+    let directExecuteSucceeded = false;
 
-    const evmClient = new EVMClient(4949039107694359620n);
-    const receiver = new Uint8Array(Buffer.from(config.vaultAddress.slice(2), "hex"));
+    if (/^0x[0-9a-fA-F]{64}$/.test(signerPk) && config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
+      try {
+        runtime.log(`Submitting direct executeHedge to vault=${config.vaultAddress} via rpc=${rpcUrl}`);
+        const account = privateKeyToAccount(signerPk as `0x${string}`);
+        const walletClient = createWalletClient({
+          account,
+          transport: viemHttp(rpcUrl, { timeout: 10_000 }),
+          chain: undefined,
+        });
 
-    if (config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
-      evmClient.writeReport(runtime, {
-        $report: true,
-        receiver,
-        report: signedReport,
+        const data = encodeFunctionData({
+          abi: KYUTE_VAULT_ABI,
+          functionName: "executeHedge",
+          args: [
+            userId,
+            shouldHedge,
+            yuToken,
+            BigInt(predictedAprBp),
+            BigInt(confidenceBp),
+            BigInt(borosAprBp),
+            BigInt(Math.round(position.hedgeNotional)),
+            proofHash,
+          ],
+        });
+
+        const txHash = await walletClient.sendTransaction({
+          account,
+          chain: undefined,
+          to: config.vaultAddress as `0x${string}`,
+          data,
+        });
+        runtime.log(`Direct executeHedge tx submitted: ${txHash}`);
+        directExecuteSucceeded = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        runtime.log(`Direct executeHedge failed (${message})`);
+      }
+    }
+
+    if (!enableReportWrite) {
+      runtime.log("CRE report write disabled in demo mode; direct execute path only.");
+    } else {
+      if (!directExecuteSucceeded) {
+        runtime.log("Direct execute failed; attempting CRE report write fallback.");
+      } else {
+        runtime.log("Direct execute succeeded; also emitting CRE report because enableReportWrite=true.");
+      }
+
+      const signedReport = runtime.report({
+        encodedPayload: hexToBase64(reportBytes),
+        encoderName: "evm",
+        signingAlgo: "ecdsa",
+        hashingAlgo: "keccak256",
       }).result();
+
+      const evmClient = new EVMClient(4949039107694359620n);
+      const receiver = new Uint8Array(Buffer.from(config.vaultAddress.slice(2), "hex"));
+
+      if (config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
+        evmClient.writeReport(runtime, {
+          $report: true,
+          receiver,
+          report: signedReport,
+        }).result();
+      }
     }
   } else {
     runtime.log(`Onchain execution disabled; report payload bytes=${reportBytes.length}`);

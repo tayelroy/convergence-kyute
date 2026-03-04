@@ -7,10 +7,15 @@ import { SavingsPortfolio } from "@/components/dashboard/SavingsPortfolio";
 import { YieldRiskGauge } from "@/components/dashboard/YieldRiskGauge";
 import { GuardianControls } from "@/components/dashboard/GuardianControls";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
+import { UserPositionHistoryChart } from "@/components/dashboard/UserPositionHistoryChart";
 import { useAgentStatus } from "@/hooks/useAgentStatus";
-import { ShieldAlert, Bell, Settings, Wallet } from "lucide-react";
+import { Bell } from "lucide-react";
+import { useHyperliquidDashboard } from "@/hooks/use-hyperliquid-dashboard";
+import { useBorosMockHedge } from "@/hooks/useBorosMockHedge";
+import { useActiveAccount } from "thirdweb/react";
 
 export default function DashboardPage() {
+    const account = useActiveAccount();
     const {
         latest,
         hedges,
@@ -25,77 +30,39 @@ export default function DashboardPage() {
         warnings,
         lastUpdated,
     } = useAgentStatus();
-    const borosAprDisplay = loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
-    const hlAprDisplay = loading ? "..." : latest ? `${latest.hl_apr.toFixed(2)}%` : "--";
-    const spreadDisplay = loading ? "..." : latest ? `${(latest.spread_bps / 100).toFixed(2)}%` : "--";
+    const live = useHyperliquidDashboard();
+    const borosMock = useBorosMockHedge(account?.address);
+    const borosAprDisplay =
+        live.borosImpliedApr != null ? `${live.borosImpliedApr.toFixed(2)}%` : loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
+    const hlAprDisplay = live.hlFundingApr != null ? `${live.hlFundingApr.toFixed(2)}%` : latest ? `${latest.hl_apr.toFixed(2)}%` : "--";
 
     return (
         <DashboardLayout>
             <TickerTape
-                assetSymbol={latest?.asset_symbol}
-                borosRate={latest?.boros_apr}
-                hyperliquidRate={latest?.hl_apr}
-                spreadBps={latest?.spread_bps}
+                assetSymbol={"ETH"}
+                borosRate={live.borosImpliedApr ?? latest?.boros_apr}
+                hyperliquidRate={live.hlFundingApr}
+                spreadBps={live.hlSpreadBps ?? latest?.spread_bps}
+                hlChangePct={live.midChangePct}
                 degraded={degraded}
-                feedRound={chainlinkFeed[0]?.feed_round}
-                feedPriceUsd={chainlinkFeed[0]?.amount_eth}
             />
 
             <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6 min-h-0">
 
                 {/* LEFT COLUMN */}
-                <div className="col-span-8 flex flex-col h-full gap-6 overflow-hidden">
-
-                    {/* Header Row */}
-                    <div className="flex-none flex items-center justify-between">
-                        <div>
-                            <div className="flex items-center gap-2">
-                                <ShieldAlert className="text-[#00ff9d]" size={24} />
-                                <h1 className="text-2xl font-bold text-white tracking-tight">kYUte SAVINGS GUARD</h1>
-                            </div>
-                            <p className="text-xs text-[#666] font-mono mt-1 ml-8">
-                                AI-POWERED YIELD PROTECTION • CRE NODE MODE ACTIVATED • ORACLE LAG: &lt;1m
-                            </p>
-                        </div>
-
-                        <div className="flex items-center space-x-3">
-                            <button className="flex items-center gap-2 px-3 py-1.5 border border-[#1a1a1a] bg-[#0a0a0a] rounded-sm text-xs text-[#888] hover:text-white transition-colors">
-                                <Wallet size={14} />
-                                <span>{latest ? `${latest.asset_symbol} Vault` : "No Wallet"}</span>
-                            </button>
-                            <button className="p-2 border border-[#1a1a1a] bg-[#0a0a0a] text-[#666] hover:text-white transition-colors rounded-sm">
-                                <Bell size={16} />
-                            </button>
-                            <button className="p-2 border border-[#1a1a1a] bg-[#0a0a0a] text-[#666] hover:text-white transition-colors rounded-sm">
-                                <Settings size={16} />
-                            </button>
-                        </div>
+                <div className="col-span-8 min-w-0 flex flex-col h-full gap-6 overflow-hidden">
+                    <div className="flex-none">
+                        <UserPositionHistoryChart points={live.historyPoints} loading={live.loading} />
                     </div>
 
-                    {/* Quick Stats Row */}
-                    <div className="grid grid-cols-5 gap-4">
+                    <div className="grid grid-cols-2 gap-4">
                         <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
                             <p className="text-[10px] text-[#666] uppercase tracking-wider">Boros Implied APR</p>
                             <p className="text-2xl font-mono text-white mt-1">{borosAprDisplay}</p>
                         </div>
                         <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">HL Funding</p>
+                            <p className="text-[10px] text-[#666] uppercase tracking-wider">HL Funding (Live)</p>
                             <p className="text-2xl font-mono text-[#00ff9d] mt-1">{hlAprDisplay}</p>
-                        </div>
-                        <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm relative">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">AI Predicted</p>
-                            <p className="text-2xl font-mono text-[#fbbf24] mt-1">{latest ? `${(latest.hl_apr + 2).toFixed(2)}%` : "--"}</p>
-                        </div>
-                        <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">Confidence Guard</p>
-                            <p className="text-2xl font-mono text-[#3b82f6] mt-1">{latest ? "80%" : "--"}</p>
-                            <div className="absolute text-[8px] text-[#666] bottom-1">Min: 60%</div>
-                        </div>
-                        <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">CRE Proof Hash</p>
-                            <p className="text-md font-mono text-[#8b5cf6] mt-3">
-                                {latest ? `0x${Math.random().toString(16).slice(2, 10)}...` : "--"}
-                            </p>
                         </div>
                     </div>
 
@@ -164,7 +131,26 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    {/* 4. Execution Logs */}
+                    {/* 4. Boros Hedge (Demo Mock) */}
+                    {borosMock.enabled && (
+                        <div className={`p-3 rounded-sm border ${borosMock.isActive ? "bg-emerald-500/5 border-emerald-500/30" : "bg-zinc-500/5 border-zinc-500/30"}`}>
+                            <p className="text-[10px] uppercase tracking-wider text-neutral-400">Boros Hedge</p>
+                            <p className={`text-xs font-mono mt-1 ${borosMock.isActive ? "text-emerald-300" : "text-neutral-300"}`}>
+                                {borosMock.loading && !borosMock.error
+                                    ? "Checking mock Boros position..."
+                                    : borosMock.isActive
+                                        ? `Boros hedge active • ${borosMock.isLong ? "LONG" : "SHORT"} • ${borosMock.amountEth.toFixed(4)} ETH`
+                                        : "No Boros hedge"}
+                            </p>
+                            {borosMock.error && (
+                                <p className="text-[10px] mt-1 text-yellow-300/80 font-mono truncate">
+                                    mock read error: {borosMock.error}
+                                </p>
+                            )}
+                        </div>
+                    )}
+
+                    {/* 5. Execution Logs */}
                     <div className="flex-1 min-h-0 relative overflow-hidden">
                         <ExecutionConsole
                             aiLogs={aiLogs}

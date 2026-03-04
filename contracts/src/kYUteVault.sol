@@ -46,7 +46,7 @@ contract kYUteVault is ERC4626, Ownable {
         uint256 amount,
         bool isLong
     );
-    event BorosHedgeClosed(address indexed user, address yuToken);
+    event BorosHedgeClosed(address indexed user, address yuToken, uint256 amount);
     event HedgeDecision(
         bytes32 proofHash,
         uint256 predictedApr,
@@ -125,7 +125,7 @@ contract kYUteVault is ERC4626, Ownable {
 
         if (pos.hasBorosHedge) {
             borosRouter.closePosition(user, pos.yuToken);
-            emit BorosHedgeClosed(user, pos.yuToken);
+            emit BorosHedgeClosed(user, pos.yuToken, pos.notional);
         }
 
         emit HyperliquidPositionClosed(user);
@@ -140,6 +140,7 @@ contract kYUteVault is ERC4626, Ownable {
         int256 predictedApr,
         uint256 confidenceBp,
         int256 borosApr,
+        uint256 hedgeNotional,
         bytes32 proofHash
     ) external onlyCRE {
         address user = userIdToAddress[userId];
@@ -161,7 +162,7 @@ contract kYUteVault is ERC4626, Ownable {
         // 3. Check TVL per hedge cap (10%)
         // Notional should not exceed 10% of vault's totalAssets
         uint256 vaultTvl = totalAssets();
-        if (pos.notional > (vaultTvl * MAX_TVL_HEDGE_BP) / 10000) {
+        if (hedgeNotional > (vaultTvl * MAX_TVL_HEDGE_BP) / 10000) {
             revert TvlCapBreach();
         }
 
@@ -180,17 +181,17 @@ contract kYUteVault is ERC4626, Ownable {
             // Long HL -> open Long YU; Short HL -> open Short YU
             bool hedgeIsLong = pos.isLong;
 
-            borosRouter.openPosition(user, yuToken, pos.notional, hedgeIsLong);
+            borosRouter.openPosition(user, yuToken, hedgeNotional, hedgeIsLong);
             pos.hasBorosHedge = true;
             pos.yuToken = yuToken;
 
-            emit BorosHedgeOpened(user, yuToken, pos.notional, hedgeIsLong);
+            emit BorosHedgeOpened(user, yuToken, hedgeNotional, hedgeIsLong);
         } else if (!shouldHedge && pos.hasBorosHedge) {
             // Close hedge
             borosRouter.closePosition(user, pos.yuToken);
             pos.hasBorosHedge = false;
 
-            emit BorosHedgeClosed(user, pos.yuToken);
+            emit BorosHedgeClosed(user, pos.yuToken, hedgeNotional);
         }
 
         // Update timestamp to allow subsequent checks

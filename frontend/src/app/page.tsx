@@ -8,8 +8,12 @@ import { GradientButton } from "@/components/ui/gradient-button";
 import { Header1 } from "@/components/ui/header";
 import { LiveArbitragePulse } from "@/components/ui/live-arbitrage-pulse";
 import { VaultHeroCard } from "@/components/ui/vault-hero-card";
+import { useSearchParams } from "next/navigation";
 
 export default function LandingPage() {
+  const searchParams = useSearchParams();
+  const reason = searchParams.get("reason");
+
   return (
     <main className="relative min-h-screen pt-40 bg-[#020617]">
       <Header1 />
@@ -52,13 +56,13 @@ export default function LandingPage() {
             transition={{ delay: 0.8, duration: 0.8 }}
             className="flex gap-4 items-center"
           >
-            <Link href="/dashboard">
+            <Link href="/onboarding">
               <GradientButton
                 variant="variant"
                 className="rounded-[1.15rem] px-8 py-6 text-xl font-semibold backdrop-blur-md group"
               >
                 <span className="opacity-90 group-hover:opacity-100 transition-opacity">
-                  Enter Dashboard
+                  Start Onboarding
                 </span>
                 <span
                   className="ml-3 opacity-70 group-hover:opacity-100 group-hover:translate-x-1.5 
@@ -75,6 +79,12 @@ export default function LandingPage() {
               Run Hedge Now
             </button>
           </motion.div>
+
+          {reason === "connect_wallet" && (
+            <p className="text-xs text-yellow-300/90 font-mono">
+              Connect wallet first, then open a position to unlock dashboard access.
+            </p>
+          )}
 
           {/* Vault Hero Card — below the CTA */}
           <VaultHeroCard />
