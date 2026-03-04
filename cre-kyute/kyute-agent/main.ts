@@ -10,7 +10,15 @@ import {
   type Runtime,
 } from "@chainlink/cre-sdk";
 import { formatPrice, formatSize } from "@nktkas/hyperliquid/utils";
-import { encodeAbiParameters, keccak256, toBytes } from "viem";
+import {
+  createWalletClient,
+  encodeAbiParameters,
+  encodeFunctionData,
+  http as viemHttp,
+  keccak256,
+  toBytes,
+} from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 type PerpSide = "buy" | "sell";
 type PerpOrderType = "market" | "limit";
@@ -317,6 +325,9 @@ type Config = {
   hlBaseUrl?: string;
   thresholdBp?: number;
   windowHours?: number;
+  callbackPrivateKey?: `0x${string}`;
+  rpcUrl?: string;
+  enableReportWrite?: boolean;
   executeOnchain?: boolean;
 };
 
@@ -334,6 +345,27 @@ const THRESHOLD_BP = 10;
 const WINDOW_HOURS = 1;
 const FEE_BUFFER_BP = 10;
 const MIN_CONFIDENCE_BP = 6000;
+const DEFAULT_ANVIL_RPC_URL = "http://localhost:8545";
+const DEFAULT_ANVIL_PRIVATE_KEY =
+  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const KYUTE_VAULT_ABI = [
+  {
+    type: "function",
+    name: "executeHedge",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "userId", type: "uint256" },
+      { name: "shouldHedge", type: "bool" },
+      { name: "yuToken", type: "address" },
+      { name: "predictedApr", type: "int256" },
+      { name: "confidenceBp", type: "uint256" },
+      { name: "borosApr", type: "int256" },
+      { name: "hedgeNotional", type: "uint256" },
+      { name: "proofHash", type: "bytes32" },
+    ],
+    outputs: [],
+  },
+] as const;
 const HL_MAINNET_URL = "https://api.hyperliquid.xyz/info";
 const HL_TESTNET_URL = "https://api.hyperliquid-testnet.xyz/info";
 
@@ -539,6 +571,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
   const userId = BigInt(config.userId ?? 123);
   const yuToken = (config.yuToken ?? "0x0000000000000000000000000000000000000001") as `0x${string}`;
   const executeOnchain = config.executeOnchain ?? false;
+  const enableReportWrite = config.enableReportWrite ?? false;
 
   const proofPayload = JSON.stringify({
     type: "kYUteMvpNodeModeProof",
@@ -594,22 +627,75 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
   )
 
   if (executeOnchain) {
-    const signedReport = runtime.report({
-      encodedPayload: hexToBase64(reportBytes),
-      encoderName: "evm",
-      signingAlgo: "ecdsa",
-      hashingAlgo: "keccak256",
-    }).result();
+    const signerPk = config.callbackPrivateKey ?? DEFAULT_ANVIL_PRIVATE_KEY;
+    const rpcUrl = config.rpcUrl ?? DEFAULT_ANVIL_RPC_URL;
+    let directExecuteSucceeded = false;
 
-    const evmClient = new EVMClient(4949039107694359620n);
-    const receiver = new Uint8Array(Buffer.from(config.vaultAddress.slice(2), "hex"));
+    if (/^0x[0-9a-fA-F]{64}$/.test(signerPk) && config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
+      try {
+        runtime.log(`Submitting direct executeHedge to vault=${config.vaultAddress} via rpc=${rpcUrl}`);
+        const account = privateKeyToAccount(signerPk as `0x${string}`);
+        const walletClient = createWalletClient({
+          account,
+          transport: viemHttp(rpcUrl, { timeout: 10_000 }),
+          chain: undefined,
+        });
 
-    if (config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
-      evmClient.writeReport(runtime, {
-        $report: true,
-        receiver,
-        report: signedReport,
+        const data = encodeFunctionData({
+          abi: KYUTE_VAULT_ABI,
+          functionName: "executeHedge",
+          args: [
+            userId,
+            shouldHedge,
+            yuToken,
+            BigInt(predictedAprBp),
+            BigInt(confidenceBp),
+            BigInt(borosAprBp),
+            BigInt(Math.round(position.hedgeNotional)),
+            proofHash,
+          ],
+        });
+
+        const txHash = await walletClient.sendTransaction({
+          account,
+          chain: undefined,
+          to: config.vaultAddress as `0x${string}`,
+          data,
+        });
+        runtime.log(`Direct executeHedge tx submitted: ${txHash}`);
+        directExecuteSucceeded = true;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        runtime.log(`Direct executeHedge failed (${message})`);
+      }
+    }
+
+    if (!enableReportWrite) {
+      runtime.log("CRE report write disabled in demo mode; direct execute path only.");
+    } else {
+      if (!directExecuteSucceeded) {
+        runtime.log("Direct execute failed; attempting CRE report write fallback.");
+      } else {
+        runtime.log("Direct execute succeeded; also emitting CRE report because enableReportWrite=true.");
+      }
+
+      const signedReport = runtime.report({
+        encodedPayload: hexToBase64(reportBytes),
+        encoderName: "evm",
+        signingAlgo: "ecdsa",
+        hashingAlgo: "keccak256",
       }).result();
+
+      const evmClient = new EVMClient(4949039107694359620n);
+      const receiver = new Uint8Array(Buffer.from(config.vaultAddress.slice(2), "hex"));
+
+      if (config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
+        evmClient.writeReport(runtime, {
+          $report: true,
+          receiver,
+          report: signedReport,
+        }).result();
+      }
     }
   } else {
     runtime.log(`Onchain execution disabled; report payload bytes=${reportBytes.length}`);

@@ -11,8 +11,11 @@ import { UserPositionHistoryChart } from "@/components/dashboard/UserPositionHis
 import { useAgentStatus } from "@/hooks/useAgentStatus";
 import { Bell } from "lucide-react";
 import { useHyperliquidDashboard } from "@/hooks/use-hyperliquid-dashboard";
+import { useBorosMockHedge } from "@/hooks/useBorosMockHedge";
+import { useActiveAccount } from "thirdweb/react";
 
 export default function DashboardPage() {
+    const account = useActiveAccount();
     const {
         latest,
         hedges,
@@ -28,6 +31,7 @@ export default function DashboardPage() {
         lastUpdated,
     } = useAgentStatus();
     const live = useHyperliquidDashboard();
+    const borosMock = useBorosMockHedge(account?.address);
     const borosAprDisplay =
         live.borosImpliedApr != null ? `${live.borosImpliedApr.toFixed(2)}%` : loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay = live.hlFundingApr != null ? `${live.hlFundingApr.toFixed(2)}%` : latest ? `${latest.hl_apr.toFixed(2)}%` : "--";
@@ -127,7 +131,26 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    {/* 4. Execution Logs */}
+                    {/* 4. Boros Hedge (Demo Mock) */}
+                    {borosMock.enabled && (
+                        <div className={`p-3 rounded-sm border ${borosMock.isActive ? "bg-emerald-500/5 border-emerald-500/30" : "bg-zinc-500/5 border-zinc-500/30"}`}>
+                            <p className="text-[10px] uppercase tracking-wider text-neutral-400">Boros Hedge</p>
+                            <p className={`text-xs font-mono mt-1 ${borosMock.isActive ? "text-emerald-300" : "text-neutral-300"}`}>
+                                {borosMock.loading && !borosMock.error
+                                    ? "Checking mock Boros position..."
+                                    : borosMock.isActive
+                                        ? `Boros hedge active • ${borosMock.isLong ? "LONG" : "SHORT"} • ${borosMock.amountEth.toFixed(4)} ETH`
+                                        : "No Boros hedge"}
+                            </p>
+                            {borosMock.error && (
+                                <p className="text-[10px] mt-1 text-yellow-300/80 font-mono truncate">
+                                    mock read error: {borosMock.error}
+                                </p>
+                            )}
+                        </div>
+                    )}
+
+                    {/* 5. Execution Logs */}
                     <div className="flex-1 min-h-0 relative overflow-hidden">
                         <ExecutionConsole
                             aiLogs={aiLogs}
