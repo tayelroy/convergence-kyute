@@ -91,6 +91,7 @@ contract kYUteVaultTest is Test {
             1500, // predictedApr (15%)
             6500, // confidenceBp (65%)
             1000, // borosApr (10%)
+            10 ether, // hedgeNotional
             mockProof // proofHash
         );
 
@@ -115,6 +116,7 @@ contract kYUteVaultTest is Test {
             1500,
             5000, // 50%, below 60% requirement
             1000,
+            10 ether,
             mockProof
         );
     }
@@ -142,6 +144,7 @@ contract kYUteVaultTest is Test {
             1500,
             6500,
             1000,
+            11 ether,
             mockProof
         );
     }
@@ -160,6 +163,7 @@ contract kYUteVaultTest is Test {
             1005, // 10.05%
             6500,
             1000, // 10% (buffer is 0.1%, meaning predicted must be strictly > 10.1%)
+            10 ether,
             mockProof
         );
     }
@@ -177,6 +181,7 @@ contract kYUteVaultTest is Test {
             1500,
             6500,
             1000,
+            10 ether,
             mockProof
         );
     }

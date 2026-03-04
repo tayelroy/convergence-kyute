@@ -85,6 +85,30 @@ sleep 3
 echo "   ✓ Anvil running (PID: ${ANVIL_PID})"
 echo ""
 
+deploy_mock_router() {
+    echo "   • BOROS_ROUTER_ADDRESS not set; deploying MockBorosRouter to local fork..."
+    cd "${CONTRACTS_DIR}"
+    if ! forge script script/DeployMockBorosRouter.s.sol:DeployMockBorosRouter --fork-url http://localhost:8545 --unlocked --sender "${ANVIL_DEPLOYER}" --broadcast > /tmp/kyute_mock_router.log 2>&1; then
+        echo "     ✗ Mock router deployment failed."
+        echo "       Showing last 20 lines from /tmp/kyute_mock_router.log:"
+        tail -n 20 /tmp/kyute_mock_router.log
+        exit 1
+    fi
+    local addr
+    addr=$(grep -Eo "Deployed to: 0x[0-9a-fA-F]{40}" /tmp/kyute_mock_router.log | tail -n1 | awk '{print $3}')
+    if [ -z "${addr}" ]; then
+        echo "     ✗ Could not parse mock router address from deploy log."
+        exit 1
+    fi
+    export BOROS_ROUTER_ADDRESS="${addr}"
+    echo "   ✓ Mock Boros router deployed at ${BOROS_ROUTER_ADDRESS}"
+}
+
+# If no router address provided, deploy a mock to the fork.
+if [ -z "${BOROS_ROUTER_ADDRESS:-}" ] || [ "${BOROS_ROUTER_ADDRESS}" = "0x0000000000000000000000000000000000000000" ]; then
+    deploy_mock_router
+fi
+
 # ── 3. Deploy kYUteVault ──────────────────────────
 echo "[2/4] Deploying kYUteVault to local fork..."
 cd "${CONTRACTS_DIR}"

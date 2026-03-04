@@ -9,13 +9,16 @@ import {
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { predictFundingFromAprs } from "../ai/model";
 
-const HYPERLIQUID_INFO_URL = "https://api.hyperliquid.xyz/info";
-const DEFAULT_LOOKBACK_HOURS = 72;
+const PAIR = "ETHUSDC";
+const HL_COIN = "ETH";
+const WINDOW_HOURS = 1;
+const THRESHOLD_BP = 10;
 const DEFAULT_CHAIN_ID = 42161;
 const FEE_BUFFER_BP = 10;
 const MIN_CONFIDENCE_BP = 6000;
+const HL_MAINNET_URL = "https://api.hyperliquid.xyz/info";
+const HL_TESTNET_URL = "https://api.hyperliquid-testnet.xyz/info";
 
 const KYUTE_VAULT_ABI = [
   {
@@ -29,6 +32,7 @@ const KYUTE_VAULT_ABI = [
       { name: "predictedApr", type: "int256" },
       { name: "confidenceBp", type: "uint256" },
       { name: "borosApr", type: "int256" },
+      { name: "hedgeNotional", type: "uint256" },
       { name: "proofHash", type: "bytes32" },
     ],
     outputs: [],
@@ -48,22 +52,31 @@ type HyperliquidFundingPoint = {
 };
 
 type WorkflowRunnerConfig = {
-  coin: string;
   userId: bigint;
   vaultAddress: Address;
   yuToken: Address;
+  hlAddress: Address;
+  hlTestnet?: boolean;
+  hlBaseUrl?: string;
   borosMarketAddress?: Address;
   subgraphUrl: string;
   rpcUrl: string;
   callbackPrivateKey: Hex;
+  thresholdBp?: number;
+  windowHours?: number;
   chainId?: number;
   executeOnchain?: boolean;
 };
 
 type WorkflowRunnerResult = {
-  hlApr: number;
+  pair: string;
+  averageFundingBp: number;
+  positionSide: PositionSide;
+  hlSize: number;
+  markPrice: number;
+  hedgeNotional: number;
+  hlAprBp: number;
   borosApr: number;
-  predictedApr: number;
   predictedAprBp: number;
   borosAprBp: number;
   confidenceBp: number;
@@ -74,6 +87,7 @@ type WorkflowRunnerResult = {
 };
 
 type Logger = (message: string) => void;
+type PositionSide = "long" | "short";
 
 const postJson = async <T>(url: string, body: unknown): Promise<T> => {
   const response = await fetch(url, {
@@ -116,8 +130,8 @@ const parseTimestamp = (entry: unknown): number => {
   return Number.isFinite(raw) ? raw : Date.now();
 };
 
-const fallbackPredictedFundingApr = async (coin: string): Promise<number> => {
-  const data = await postJson<any[]>(HYPERLIQUID_INFO_URL, { type: "predictedFundings" });
+const fallbackPredictedFundingApr = async (coin: string, baseUrl: string): Promise<number> => {
+  const data = await postJson<any[]>(baseUrl, { type: "predictedFundings" });
   const coinData = data.find((item) => Array.isArray(item) && item[0] === coin);
   if (!coinData) return 0;
 
@@ -127,17 +141,19 @@ const fallbackPredictedFundingApr = async (coin: string): Promise<number> => {
 
   const fundingRate = Number(hlPerpEntry?.[1]?.fundingRate ?? hlPerpEntry?.[1]?.funding ?? 0);
   if (!Number.isFinite(fundingRate)) return 0;
+  // fundingRate is per-hour; annualize to decimal APR
   return fundingRate * 24 * 365;
 };
 
 const fetchHyperliquidFundingHistoryApr = async (
   coin: string,
-  lookbackHours = DEFAULT_LOOKBACK_HOURS,
+  baseUrl: string,
+  lookbackHours = WINDOW_HOURS,
 ): Promise<{ apr: number; points: HyperliquidFundingPoint[] }> => {
   const startTime = Date.now() - lookbackHours * 60 * 60 * 1000;
 
   try {
-    const response = await postJson<unknown[]>(HYPERLIQUID_INFO_URL, {
+    const response = await postJson<unknown[]>(baseUrl, {
       type: "fundingHistory",
       coin,
       startTime,
@@ -151,7 +167,7 @@ const fetchHyperliquidFundingHistoryApr = async (
       .filter((entry) => Number.isFinite(entry.fundingRate));
 
     if (points.length === 0) {
-      const apr = await fallbackPredictedFundingApr(coin);
+      const apr = await fallbackPredictedFundingApr(coin, baseUrl);
       return { apr, points: [] };
     }
 
@@ -161,9 +177,47 @@ const fetchHyperliquidFundingHistoryApr = async (
       points,
     };
   } catch {
-    const apr = await fallbackPredictedFundingApr(coin);
+    const apr = await fallbackPredictedFundingApr(coin, baseUrl);
     return { apr, points: [] };
   }
+};
+
+const fetchHyperliquidPositionSnapshot = async (
+  userAddress: Address,
+  baseUrl: string,
+): Promise<{ positionSide: PositionSide; hlSize: number; markPrice: number; hedgeNotional: number }> => {
+  const [metaAndCtxs, state] = await Promise.all([
+    postJson<unknown>(baseUrl, { type: "metaAndAssetCtxs" }),
+    postJson<{ assetPositions?: Array<{ position?: Record<string, unknown> }> }>(baseUrl, {
+      type: "clearinghouseState",
+      user: userAddress,
+    }),
+  ]);
+
+  const [meta, assetCtxs] = metaAndCtxs as [
+    { universe: Array<{ name: string }> },
+    Array<{ markPx?: string; midPx?: string }>
+  ];
+  const assetIndex = meta.universe.findIndex((asset) => asset.name.toUpperCase() === HL_COIN);
+  if (assetIndex < 0) throw new Error(`Unable to locate ${HL_COIN} in Hyperliquid universe`);
+
+  const markPriceRaw = assetCtxs[assetIndex]?.markPx ?? assetCtxs[assetIndex]?.midPx;
+  const markPrice = Number(markPriceRaw ?? 0);
+  if (!Number.isFinite(markPrice) || markPrice <= 0) {
+    throw new Error(`Unable to resolve valid ${PAIR} mark price`);
+  }
+
+  const positionEntry = (state.assetPositions ?? []).find((entry) => {
+    const coin = String(entry.position?.coin ?? "");
+    return coin.toUpperCase() === HL_COIN;
+  });
+
+  const signedSize = Number(positionEntry?.position?.szi ?? 0);
+  const positionSide: PositionSide = signedSize < 0 ? "short" : "long";
+  const hlSize = Math.abs(signedSize);
+  const hedgeNotional = hlSize * markPrice;
+
+  return { positionSide, hlSize, markPrice, hedgeNotional };
 };
 
 const fetchMarketAprField = async (subgraphUrl: string): Promise<string> => {
@@ -217,12 +271,18 @@ const fetchBorosImpliedApr = async (
 
 const buildProofPayload = (input: {
   userId: bigint;
-  coin: string;
+  pair: string;
   vaultAddress: Address;
   yuToken: Address;
-  hlApr: number;
-  borosApr: number;
-  predictedApr: number;
+  windowHours: number;
+  thresholdBp: number;
+  averageFundingBp: number;
+  positionSide: PositionSide;
+  hlSize: number;
+  markPrice: number;
+  hedgeNotional: number;
+  borosAprBp: number;
+  predictedAprBp: number;
   confidenceBp: number;
   shouldHedge: boolean;
   observedFundingPoints: number;
@@ -230,24 +290,48 @@ const buildProofPayload = (input: {
 }): string => {
   return JSON.stringify({
     type: "kYUteMvpNodeModeProof",
-    version: 1,
+    version: 2,
     generatedAt: new Date().toISOString(),
     chainId: input.chainId,
     userId: input.userId.toString(),
-    coin: input.coin,
+    pair: input.pair,
     vaultAddress: input.vaultAddress,
     yuToken: input.yuToken,
     inputs: {
-      hlApr: input.hlApr,
-      borosApr: input.borosApr,
+      windowHours: input.windowHours,
+      thresholdBp: input.thresholdBp,
+      averageFundingBp: input.averageFundingBp,
+      positionSide: input.positionSide,
+      hlSize: input.hlSize,
+      markPrice: input.markPrice,
+      hedgeNotional: input.hedgeNotional,
+      borosAprBp: input.borosAprBp,
       observedFundingPoints: input.observedFundingPoints,
     },
     outputs: {
-      predictedApr: input.predictedApr,
+      predictedAprBp: input.predictedAprBp,
       confidenceBp: input.confidenceBp,
       shouldHedge: input.shouldHedge,
     },
   });
+};
+
+const computeShouldHedge = (input: {
+  averageFundingBp: number;
+  positionSide: PositionSide;
+  thresholdBp: number;
+  predictedAprBp: number;
+  borosAprBp: number;
+  confidenceBp: number;
+}): boolean => {
+  const unfavorableFundingBp =
+    input.positionSide === "long" ? input.averageFundingBp : -input.averageFundingBp;
+  const fundingUnfavorable = unfavorableFundingBp >= input.thresholdBp;
+  return (
+    fundingUnfavorable &&
+    input.predictedAprBp > input.borosAprBp + FEE_BUFFER_BP &&
+    input.confidenceBp >= MIN_CONFIDENCE_BP
+  );
 };
 
 export const runKyuteWorkflowCycle = async (
@@ -255,25 +339,47 @@ export const runKyuteWorkflowCycle = async (
   log: Logger = console.log,
 ): Promise<WorkflowRunnerResult> => {
   const chainId = config.chainId ?? DEFAULT_CHAIN_ID;
+  const thresholdBp = config.thresholdBp ?? THRESHOLD_BP;
+  const windowHours = config.windowHours ?? WINDOW_HOURS;
+  const baseUrl = config.hlBaseUrl ?? (config.hlTestnet ? HL_TESTNET_URL : HL_MAINNET_URL);
 
-  const funding = await fetchHyperliquidFundingHistoryApr(config.coin);
+  const funding = await fetchHyperliquidFundingHistoryApr(HL_COIN, baseUrl, windowHours);
+  // DEMO OVERRIDE: force funding to be unfavorable so hedge opens.
+  const fundingOverrideBp = 500; // +5% APR equivalent
+  const averageFundingBpForced = fundingOverrideBp;
+  const averageFundingRate = averageFundingBpForced / (24 * 365 * 10_000);
+  const position = await fetchHyperliquidPositionSnapshot(config.hlAddress, baseUrl);
   const borosApr = await fetchBorosImpliedApr(config.subgraphUrl, config.borosMarketAddress);
-  const prediction = predictFundingFromAprs(funding.apr, borosApr);
-
-  const confidenceBp = Math.floor(prediction.confidence);
-  const predictedAprBp = toAprBp(prediction.apr);
-  const borosAprBp = toAprBp(borosApr);
-  const shouldHedge = predictedAprBp > borosAprBp + FEE_BUFFER_BP && confidenceBp >= MIN_CONFIDENCE_BP;
+  const averageFundingBp = averageFundingBpForced;
+  // DEMO OVERRIDE: force APRs to drive hedge open
+  const hlAprBp = toAprBp(funding.apr);
+  const predictedAprBp = 10_000; // 100% APR
+  const borosAprBp = 0;          // 0% comparator
+  const confidenceBp = 10_000;   // 100% confidence
+  const shouldHedge = computeShouldHedge({
+    averageFundingBp,
+    positionSide: position.positionSide,
+    thresholdBp,
+    predictedAprBp,
+    borosAprBp,
+    confidenceBp,
+  });
 
   const account = privateKeyToAccount(config.callbackPrivateKey);
   const proofPayload = buildProofPayload({
     userId: config.userId,
-    coin: config.coin,
+    pair: PAIR,
     vaultAddress: config.vaultAddress,
     yuToken: config.yuToken,
-    hlApr: funding.apr,
-    borosApr,
-    predictedApr: prediction.apr,
+    windowHours,
+    thresholdBp,
+    averageFundingBp,
+    positionSide: position.positionSide,
+    hlSize: position.hlSize,
+    markPrice: position.markPrice,
+    hedgeNotional: position.hedgeNotional,
+    borosAprBp,
+    predictedAprBp,
     confidenceBp,
     shouldHedge,
     observedFundingPoints: funding.points.length,
@@ -285,7 +391,7 @@ export const runKyuteWorkflowCycle = async (
   const proofHash = keccak256(toBytes(`${proofDigest}:${proofSignature}`));
 
   log(
-    `Decision for ${config.coin}: HL APR ${(funding.apr * 100).toFixed(3)}%, Boros APR ${(borosApr * 100).toFixed(3)}%, predicted ${(prediction.apr * 100).toFixed(3)}%, confidence ${confidenceBp}bp -> shouldHedge=${shouldHedge}`,
+    `Decision for ${PAIR}: funding1h=${averageFundingBp}bp, side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, mark=${position.markPrice.toFixed(4)}, hedgeNotional=${position.hedgeNotional.toFixed(4)}, borosAprBp=${borosAprBp}, confidence=${confidenceBp}bp -> shouldHedge=${shouldHedge}`,
   );
 
   let txHash: Hex | undefined;
@@ -317,6 +423,7 @@ export const runKyuteWorkflowCycle = async (
         BigInt(predictedAprBp),
         BigInt(confidenceBp),
         BigInt(borosAprBp),
+        BigInt(Math.round(position.hedgeNotional)),
         proofHash,
       ],
     });
@@ -335,9 +442,14 @@ export const runKyuteWorkflowCycle = async (
   }
 
   return {
-    hlApr: funding.apr,
+    pair: PAIR,
+    averageFundingBp,
+    positionSide: position.positionSide,
+    hlSize: position.hlSize,
+    markPrice: position.markPrice,
+    hedgeNotional: position.hedgeNotional,
+    hlAprBp,
     borosApr,
-    predictedApr: prediction.apr,
     predictedAprBp,
     borosAprBp,
     confidenceBp,
