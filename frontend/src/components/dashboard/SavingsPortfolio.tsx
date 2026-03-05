@@ -9,9 +9,17 @@ interface SavingsPortfolioProps {
     latest: AgentSnapshot | null;
     hedges: HedgeEvent[];
     loading?: boolean;
+    className?: string;
+    title?: string;
 }
 
-export function SavingsPortfolio({ latest, hedges, loading = false }: SavingsPortfolioProps) {
+export function SavingsPortfolio({
+    latest,
+    hedges,
+    loading = false,
+    className,
+    title = "My Savings",
+}: SavingsPortfolioProps) {
     const latestHedge = hedges[0] ?? null;
     const risk = latest && latest.spread_bps >= 800 ? "High" : latest && latest.spread_bps >= 300 ? "Medium" : "Low";
 
@@ -27,9 +35,9 @@ export function SavingsPortfolio({ latest, hedges, loading = false }: SavingsPor
     const totalValueLabel = latest ? `${latest.vault_balance_eth.toFixed(4)} ETH` : "--";
 
     return (
-        <div className="h-full w-full bg-[#0a0a0a] border border-[#1a1a1a] rounded-sm p-4 overflow-auto">
+        <div className={`h-full w-full bg-[#0a0a0a] border border-[#1a1a1a] rounded-sm p-4 overflow-hidden ${className ?? ""}`}>
             <div className="flex items-center justify-between mb-4">
-                <h2 className="text-sm font-bold text-white tracking-widest uppercase">My Savings</h2>
+                <h2 className="text-sm font-bold text-white tracking-widest uppercase">{title}</h2>
                 <span className="text-xs text-[#666] font-mono">Vault Balance: {loading ? "..." : totalValueLabel}</span>
             </div>
 

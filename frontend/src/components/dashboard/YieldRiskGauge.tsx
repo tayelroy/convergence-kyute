@@ -9,9 +9,19 @@ interface YieldRiskGaugeProps {
     latest: AgentSnapshot | null;
     aiLogs: AiDecision[];
     loading?: boolean;
+    className?: string;
+    title?: string;
+    sourceLabel?: string | null;
 }
 
-export function YieldRiskGauge({ latest, aiLogs, loading = false }: YieldRiskGaugeProps) {
+export function YieldRiskGauge({
+    latest,
+    aiLogs,
+    loading = false,
+    className,
+    title = "AI YIELD RISK",
+    sourceLabel = "GEMINI 2.0 FLASH",
+}: YieldRiskGaugeProps) {
     const latestAi = aiLogs[0] ?? null;
     const fallbackRisk = latest ? Math.min(100, Math.max(0, Math.round(latest.spread_bps / 10))) : 0;
     const riskScore = latestAi?.risk_score ?? fallbackRisk;
@@ -22,17 +32,11 @@ export function YieldRiskGauge({ latest, aiLogs, loading = false }: YieldRiskGau
         { name: "Safety", value: 100 - gaugeValue },
     ];
 
-    const getColor = (score: number) => {
-        if (score < 30) return "#00ff9d";
-        if (score < 70) return "#fbbf24";
-        return "#ef4444";
-    };
-
     return (
-        <div className="bg-[#0a0a0a] border border-[#1a1a1a] rounded-sm p-4 flex flex-col items-center justify-center">
+        <div className={`h-full bg-[#0a0a0a] border border-[#1a1a1a] rounded-sm p-4 flex flex-col items-center justify-center ${className ?? ""}`}>
             <div className="w-full flex justify-between items-center mb-2">
-                <h3 className="text-xs text-[#666] font-mono tracking-wider">AI YIELD RISK</h3>
-                <span className="text-[10px] text-[#444] font-mono">GEMINI 2.0 FLASH</span>
+                <h3 className="text-xs text-[#666] font-mono tracking-wider uppercase">{title}</h3>
+                {sourceLabel && <span className="text-[10px] text-[#444] font-mono uppercase">{sourceLabel}</span>}
             </div>
 
             <div className="relative w-[120px] h-[120px]">
@@ -49,7 +53,7 @@ export function YieldRiskGauge({ latest, aiLogs, loading = false }: YieldRiskGau
                             paddingAngle={5}
                             dataKey="value"
                         >
-                            <Cell key="risk" fill={getColor(gaugeValue)} />
+                            <Cell key="risk" fill="#ef4444" />
                             <Cell key="safety" fill="#1a1a1a" />
                         </Pie>
                     </PieChart>

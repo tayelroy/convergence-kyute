@@ -9,6 +9,8 @@ type PositionPoint = {
   totalOpen: number;
 };
 
+type PositionSide = "LONG" | "SHORT" | null;
+
 type DashboardState = {
   loading: boolean;
   error: string | null;
@@ -18,6 +20,8 @@ type DashboardState = {
   borosImpliedApr: number | null;
   midChangePct: number | null;
   totalOpenNow: number;
+  positionSide: PositionSide;
+  positionLastUpdate: number | null;
   historyPoints: PositionPoint[];
 };
 
@@ -72,17 +76,24 @@ const parseSpreadBpsFromL2Book = (data: unknown): number | null => {
   return ((bestAsk - bestBid) / mid) * 10_000;
 };
 
-const parseCurrentOpenFromClearinghouse = (data: unknown, coin = "ETH"): number => {
+const parseCurrentOpenFromClearinghouse = (
+  data: unknown,
+  coin = "ETH",
+): { totalOpen: number; side: PositionSide } => {
   const root = data as { assetPositions?: Array<{ position?: { coin?: string; szi?: string | number } }> } | undefined;
   const arr = root?.assetPositions;
-  if (!Array.isArray(arr)) return 0;
-  return arr.reduce((acc, row) => {
+  if (!Array.isArray(arr)) return { totalOpen: 0, side: null };
+  const signedTotal = arr.reduce((acc, row) => {
     const c = String(row?.position?.coin ?? "");
     if (c !== coin) return acc;
     const szi = Number(row?.position?.szi ?? 0);
     if (!Number.isFinite(szi)) return acc;
-    return acc + Math.abs(szi);
+    return acc + szi;
   }, 0);
+
+  if (signedTotal > 0) return { totalOpen: signedTotal, side: "LONG" };
+  if (signedTotal < 0) return { totalOpen: Math.abs(signedTotal), side: "SHORT" };
+  return { totalOpen: 0, side: null };
 };
 
 const cacheKey = (address: string) => `hl_dashboard_points_${address.toLowerCase()}`;
@@ -133,6 +144,8 @@ export function useHyperliquidDashboard() {
     borosImpliedApr: null,
     midChangePct: null,
     totalOpenNow: 0,
+    positionSide: null,
+    positionLastUpdate: null,
     historyPoints: [],
   });
 
@@ -158,6 +171,7 @@ export function useHyperliquidDashboard() {
                 ...s,
                 historyPoints: cached,
                 totalOpenNow: cached[cached.length - 1].totalOpen,
+                positionLastUpdate: cached[cached.length - 1].timestamp,
               }));
             }
           }
@@ -206,6 +220,8 @@ export function useHyperliquidDashboard() {
         const borosImpliedApr = toNumber(ratesSyncRaw.boros?.implied_apr);
         let historyPoints: PositionPoint[] = [];
         let totalOpenNow = 0;
+        let positionSide: PositionSide = null;
+        let positionLastUpdate: number | null = null;
 
         if (wallet) {
           const [persistedResult, clearinghouseResult] = await Promise.allSettled([
@@ -216,7 +232,10 @@ export function useHyperliquidDashboard() {
             historyPoints = persistedResult.value;
           }
           if (clearinghouseResult.status === "fulfilled") {
-            const currentOpen = parseCurrentOpenFromClearinghouse(clearinghouseResult.value, "ETH");
+            const currentPosition = parseCurrentOpenFromClearinghouse(clearinghouseResult.value, "ETH");
+            const currentOpen = currentPosition.totalOpen;
+            positionSide = currentPosition.side;
+            positionLastUpdate = Date.now();
             if (historyPoints.length === 0 && currentOpen > 0) {
               historyPoints = [{ timestamp: Date.now(), totalOpen: currentOpen }];
             }
@@ -228,6 +247,9 @@ export function useHyperliquidDashboard() {
                 : 0;
           } else {
             totalOpenNow = historyPoints.length > 0 ? historyPoints[historyPoints.length - 1].totalOpen : 0;
+          }
+          if (positionLastUpdate == null && historyPoints.length > 0) {
+            positionLastUpdate = historyPoints[historyPoints.length - 1].timestamp;
           }
 
           try {
@@ -247,6 +269,8 @@ export function useHyperliquidDashboard() {
             borosImpliedApr,
             midChangePct,
             totalOpenNow,
+            positionSide,
+            positionLastUpdate,
             historyPoints,
           });
         }

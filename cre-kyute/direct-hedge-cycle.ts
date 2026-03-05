@@ -106,6 +106,7 @@ const pushSupabaseEvent = async (payload: {
   eventType: "snapshot" | "hedge";
   status: "success" | "failed" | "skipped";
   reason: string;
+  action?: string;
   amountEth: number;
   vaultBalanceEth: number;
   spreadBps: number;
@@ -129,11 +130,12 @@ const pushSupabaseEvent = async (payload: {
     status: payload.status,
     reason: payload.reason,
     action:
-      payload.eventType === "snapshot"
+      payload.action ??
+      (payload.eventType === "snapshot"
         ? "SNAPSHOT"
         : payload.status === "success"
           ? "HEDGE"
-          : "SKIP",
+          : "SKIP"),
   };
 
   const { error } = await supabase.from("kyute_events").insert(row);
@@ -266,7 +268,8 @@ async function main() {
     await pushSupabaseEvent({
       eventType: "hedge",
       status,
-      reason,
+      reason: `tx=${txHash} shouldHedge=${shouldHedge} before=${hasBorosHedgeBefore} after=${hasBorosHedgeAfter} stateChanged=${stateChanged}`,
+      action: shouldHedge ? "OPEN_HEDGE" : "CLOSE_HEDGE",
       amountEth,
       vaultBalanceEth,
       spreadBps: Number(predictedAprBp - borosAprBp),

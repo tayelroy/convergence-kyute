@@ -24,6 +24,90 @@ interface AgentStatusResponse {
     sources: Record<SourceKey, SourceState>;
 }
 
+type HedgeDirection = "open" | "close" | "unknown";
+
+interface RawHedgeEvent {
+    timestamp: string;
+    asset_symbol: string | null;
+    boros_apr: number | null;
+    hl_apr: number | null;
+    spread_bps: number | null;
+    amount_eth: number | null;
+    market_address: string | null;
+    status: string | null;
+    reason: string | null;
+    action: string | null;
+}
+
+interface NormalizedHedgeEvent extends RawHedgeEvent {
+    hedge_direction: HedgeDirection;
+    hedge_delta_eth: number;
+    running_size_eth: number;
+}
+
+const toMillis = (timestamp: string): number => {
+    const ms = new Date(timestamp).getTime();
+    return Number.isFinite(ms) ? ms : 0;
+};
+
+const parseHedgeDirection = (row: RawHedgeEvent): HedgeDirection => {
+    const action = String(row.action ?? "").toLowerCase();
+    const reason = String(row.reason ?? "").toLowerCase();
+
+    if (
+        action.includes("open_hedge") ||
+        action.includes("hedge_open") ||
+        reason.includes("shouldhedge=true") ||
+        reason.includes("after=true")
+    ) {
+        return "open";
+    }
+    if (
+        action.includes("close_hedge") ||
+        action.includes("hedge_close") ||
+        reason.includes("shouldhedge=false") ||
+        reason.includes("after=false")
+    ) {
+        return "close";
+    }
+    return "unknown";
+};
+
+const normalizeHedgeEvents = (rows: RawHedgeEvent[]): NormalizedHedgeEvent[] => {
+    const sortedAsc = [...rows].sort((a, b) => toMillis(a.timestamp) - toMillis(b.timestamp));
+    let running = 0;
+
+    const normalizedAsc = sortedAsc.map((row) => {
+        const amountEth = Number(row.amount_eth ?? 0);
+        const amount = Number.isFinite(amountEth) ? Math.max(0, amountEth) : 0;
+        const direction = parseHedgeDirection(row);
+        const isSuccess = String(row.status ?? "").toLowerCase() === "success";
+        const previousRunning = running;
+
+        if (isSuccess) {
+            if (direction === "open") {
+                running += amount;
+            } else if (direction === "close") {
+                running = Math.max(0, running - amount);
+            } else if (amount > 0) {
+                // Backward compatibility for older rows that stored absolute hedge amount only.
+                running = amount;
+            }
+        }
+
+        const delta = running - previousRunning;
+        return {
+            ...row,
+            amount_eth: amount,
+            hedge_direction: direction,
+            hedge_delta_eth: delta,
+            running_size_eth: running,
+        };
+    });
+
+    return normalizedAsc.sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp));
+};
+
 export async function GET() {
     try {
         const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -70,10 +154,10 @@ export async function GET() {
 
             supabase
                 .from("kyute_events")
-                .select("timestamp, asset_symbol, boros_apr, hl_apr, spread_bps, amount_eth, market_address, status")
+                .select("timestamp, asset_symbol, boros_apr, hl_apr, spread_bps, amount_eth, market_address, status, reason, action")
                 .eq("event_type", "hedge")
                 .order("timestamp", { ascending: false })
-                .limit(10),
+                .limit(100),
 
             supabase
                 .from("kyute_events")
@@ -113,7 +197,7 @@ export async function GET() {
 
         const warnings: string[] = [];
         const snapshots = snapshotsResult.data ?? [];
-        const hedges = hedgesResult.data ?? [];
+        const hedges = normalizeHedgeEvents((hedgesResult.data ?? []) as RawHedgeEvent[]);
         const aiLogs = aiLogsResult.data ?? [];
         const chainlinkAutomation = automationResult.data ?? [];
         const chainlinkFunctions = functionsResult.data ?? [];

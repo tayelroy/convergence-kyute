@@ -1,15 +1,14 @@
 "use client";
 
-import React from "react";
+import React, { useMemo, useState } from "react";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { TickerTape } from "@/components/dashboard/TickerTape";
 import { SavingsPortfolio } from "@/components/dashboard/SavingsPortfolio";
 import { YieldRiskGauge } from "@/components/dashboard/YieldRiskGauge";
-import { GuardianControls } from "@/components/dashboard/GuardianControls";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
 import { UserPositionHistoryChart } from "@/components/dashboard/UserPositionHistoryChart";
+import { BorosHedgeChart } from "@/components/dashboard/BorosHedgeChart";
 import { useAgentStatus } from "@/hooks/useAgentStatus";
-import { Bell } from "lucide-react";
 import { useHyperliquidDashboard } from "@/hooks/use-hyperliquid-dashboard";
 import { useBorosMockHedge } from "@/hooks/useBorosMockHedge";
 import { useActiveAccount } from "thirdweb/react";
@@ -35,123 +34,132 @@ export default function DashboardPage() {
     const borosAprDisplay =
         live.borosImpliedApr != null ? `${live.borosImpliedApr.toFixed(2)}%` : loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay = live.hlFundingApr != null ? `${live.hlFundingApr.toFixed(2)}%` : latest ? `${latest.hl_apr.toFixed(2)}%` : "--";
+    const latestHedge = hedges[0] ?? null;
+    const liveRunningHedgeEth = Number(latestHedge?.running_size_eth ?? 0);
+    const positionLastPoint = live.historyPoints[live.historyPoints.length - 1] ?? null;
+    const hlPositionLastUpdated = live.positionLastUpdate ?? positionLastPoint?.timestamp ?? null;
+
+    const usingDemoBoros = borosMock.enabled && Boolean(account?.address);
+    const fallbackLiveHedgeAmountEth = Number.isFinite(liveRunningHedgeEth)
+        ? liveRunningHedgeEth
+        : Number(latestHedge?.amount_eth ?? 0);
+    const hedgeAmountEth = usingDemoBoros ? borosMock.amountEth : fallbackLiveHedgeAmountEth;
+    const hedgeSide = usingDemoBoros
+        ? (borosMock.isLong ? "LONG" : "SHORT")
+        : hedgeAmountEth > 0
+            ? live.positionSide
+            : null;
+    const hasHedge = usingDemoBoros ? borosMock.isActive : hedgeAmountEth > 0.0000001;
+    const hedgeLastTimestamp = latestHedge?.timestamp ?? null;
+    const [demoSeriesSeed] = useState(() => Date.now());
+    const hedgeHistoryPoints = useMemo(() => {
+        if (usingDemoBoros) {
+            return [
+                { timestamp: demoSeriesSeed - 60 * 60 * 1000, amountEth: 0 },
+                { timestamp: demoSeriesSeed, amountEth: hedgeAmountEth },
+            ];
+        }
+        const sorted = [...hedges].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
+        const points: Array<{ timestamp: number; amountEth: number }> = [];
+        for (const h of sorted) {
+            const ts = new Date(h.timestamp).getTime();
+            if (!Number.isFinite(ts)) continue;
+            const running = Number(h.running_size_eth);
+            if (Number.isFinite(running)) {
+                points.push({ timestamp: ts, amountEth: Math.max(0, running) });
+                continue;
+            }
+            const amt = Number(h.amount_eth ?? 0);
+            points.push({ timestamp: ts, amountEth: Number.isFinite(amt) ? Math.max(0, amt) : 0 });
+        }
+        return points;
+    }, [demoSeriesSeed, hedges, hedgeAmountEth, usingDemoBoros]);
+    const spreadBps = live.hlSpreadBps ?? latest?.spread_bps ?? null;
+    const yieldAlert = spreadBps != null
+        ? `Spread is ${spreadBps.toFixed(1)} bps (HL ${hlAprDisplay} vs Boros ${borosAprDisplay}); ${hasHedge ? `hedge is active${hedgeSide ? ` (${hedgeSide})` : ""}.` : "no hedge is open."}`
+        : "Spread and hedge decision will appear after the first live cycle.";
+    const syncLabel = lastUpdated
+        ? new Date(lastUpdated).toLocaleTimeString([], { hour12: false })
+        : null;
+    const alertTitle = hasHedge ? "HEDGE INTERVENTION REQUIRED" : "MONITORING SPREAD";
 
     return (
-        <DashboardLayout>
+        <DashboardLayout className="h-[100dvh] overflow-hidden">
             <TickerTape
-                assetSymbol={"ETH"}
                 borosRate={live.borosImpliedApr ?? latest?.boros_apr}
                 hyperliquidRate={live.hlFundingApr}
                 spreadBps={live.hlSpreadBps ?? latest?.spread_bps}
-                hlChangePct={live.midChangePct}
+                lastSyncLabel={syncLabel}
                 degraded={degraded}
             />
 
-            <main className="flex-1 overflow-hidden p-6 grid grid-cols-12 gap-6 min-h-0">
-
-                {/* LEFT COLUMN */}
-                <div className="col-span-8 min-w-0 flex flex-col h-full gap-6 overflow-hidden">
-                    <div className="flex-none">
-                        <UserPositionHistoryChart points={live.historyPoints} loading={live.loading} />
-                    </div>
-
-                    <div className="grid grid-cols-2 gap-4">
-                        <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">Boros Implied APR</p>
-                            <p className="text-2xl font-mono text-white mt-1">{borosAprDisplay}</p>
-                        </div>
-                        <div className="p-4 bg-[linear-gradient(45deg,#0a0a0a,#111)] border border-[#1a1a1a] rounded-sm">
-                            <p className="text-[10px] text-[#666] uppercase tracking-wider">HL Funding (Live)</p>
-                            <p className="text-2xl font-mono text-[#00ff9d] mt-1">{hlAprDisplay}</p>
-                        </div>
-                    </div>
-
-                    {(error || degraded || !latest) && !loading && (
-                        <div className="p-3 border rounded-sm bg-yellow-500/5 border-yellow-500/30">
-                            <p className="text-xs text-yellow-300 font-mono">
-                                {error
-                                    ? `Data status: ${error}`
-                                    : !latest
-                                        ? "Data status: awaiting first live snapshot from agent."
-                                        : "Data status: degraded telemetry mode."}
-                            </p>
+            <main className="flex-1 min-h-0 p-3 md:p-4 overflow-y-auto lg:overflow-hidden">
+                <div className="h-full grid grid-cols-1 gap-3 lg:grid-cols-12 lg:grid-rows-[minmax(0,0.8fr)_minmax(0,1.35fr)_minmax(0,1fr)]">
+                    <div className="min-h-0 border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-6">
+                        <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">YIELD ALERT</h3>
+                        <div className="mt-3 rounded-sm border border-[#7a3d15] bg-[#2a1708] px-4 py-3">
+                            <p className="text-sm font-bold font-mono uppercase tracking-wide text-orange-400">{alertTitle}</p>
+                            <p className="text-sm mt-3 leading-relaxed text-[#e0c3a4]">{yieldAlert}</p>
+                            {(error || degraded || !latest) && !loading && (
+                                <p className="text-[11px] mt-3 text-yellow-300/80 font-mono">
+                                    {error
+                                        ? `Data status: ${error}`
+                                        : !latest
+                                            ? "Data status: awaiting first live snapshot."
+                                            : "Data status: degraded telemetry mode."}
+                                </p>
+                            )}
                             {warnings.length > 0 && (
-                                <p className="text-[10px] text-yellow-200/70 mt-1 font-mono truncate">
+                                <p className="text-[10px] mt-2 text-yellow-200/60 font-mono truncate">
                                     {warnings[0]}
                                 </p>
                             )}
-                            {lastUpdated && (
-                                <p className="text-[10px] text-yellow-200/50 mt-1 font-mono">
-                                    Last API update: {new Date(lastUpdated).toLocaleString()}
-                                </p>
-                            )}
                         </div>
-                    )}
-                    {/* Main Portfolio Table */}
-                    <div className="flex-1 min-h-0 relative overflow-hidden">
-                        <SavingsPortfolio latest={latest} hedges={hedges} loading={loading} />
                     </div>
 
-                </div>
-
-                {/* RIGHT COLUMN */}
-                <div className="col-span-4 flex flex-col h-full gap-4 overflow-hidden">
-
-                    {/* 1. AI Risk Gauge */}
-                    <div className="flex-none">
-                        <YieldRiskGauge latest={latest} aiLogs={aiLogs} loading={loading} />
+                    <div className="min-h-0 border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-3">
+                        <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">BOROS FUNDING</h3>
+                        <div className="mt-6 text-center">
+                            <p className="text-[10px] text-[#666] font-mono uppercase">IMPLIED APR</p>
+                            <p className="mt-2 text-4xl leading-none font-mono text-emerald-400">{borosAprDisplay}</p>
+                            <p className="mt-2 text-[10px] text-[#5e6575] font-mono italic">Last 24h Avg</p>
+                        </div>
                     </div>
 
-                    {/* 2. Guardian Controls */}
-                    <div className="flex-none">
-                        <GuardianControls
-                            latest={latest}
-                            aiLogs={aiLogs}
-                            hedges={hedges}
-                            chainlinkAutomation={chainlinkAutomation}
-                            chainlinkFunctions={chainlinkFunctions}
-                            chainlinkFeed={chainlinkFeed}
-                            chainlinkCcip={chainlinkCcip}
-                            loading={loading}
+                    <div className="min-h-0 border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-3">
+                        <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">HL FUNDING</h3>
+                        <div className="mt-6 text-center">
+                            <p className="text-[10px] text-[#666] font-mono uppercase">LIVE RATE</p>
+                            <p className="mt-2 text-4xl leading-none font-mono text-[#53a2ff]">{hlAprDisplay}</p>
+                            <p className="mt-2 text-[10px] text-[#5e6575] font-mono italic">Next Epoch</p>
+                        </div>
+                    </div>
+
+                    <div className="min-h-0 lg:col-span-6">
+                        <UserPositionHistoryChart
+                            points={live.historyPoints}
+                            currentSizeEth={live.totalOpenNow}
+                            lastUpdatedAt={hlPositionLastUpdated ? new Date(hlPositionLastUpdated).toLocaleString() : null}
+                            loading={live.loading}
                         />
                     </div>
 
-                    {/* 3. Yield Alert */}
-                    <div className="p-3 bg-blue-500/5 border border-blue-500/20 rounded-sm">
-                        <div className="flex gap-2">
-                            <Bell size={14} className="text-blue-400 mt-1 shrink-0" />
-                            <div>
-                                <h4 className="text-xs font-bold text-blue-400">Yield Alert</h4>
-                                <p className="text-[10px] text-blue-200/70 mt-1 leading-tight">
-                                    {latest
-                                        ? `AI predicts ${(latest.hl_apr + 2).toFixed(2)}% APR vs Boros ${latest.boros_apr.toFixed(2)}%. Buffer check passed (>0.1%). Hedge OPEN.`
-                                        : "kYUte is monitoring yield spreads..."}
-                                </p>
-                            </div>
-                        </div>
+                    <div className="min-h-0 lg:col-span-6">
+                        <BorosHedgeChart
+                            points={hedgeHistoryPoints}
+                            currentAmountEth={hedgeAmountEth}
+                            hedgeSide={hasHedge ? hedgeSide ?? "LONG" : null}
+                            lastUpdatedAt={hedgeLastTimestamp ? new Date(hedgeLastTimestamp).toLocaleString() : null}
+                            loading={loading}
+                            isDemo={usingDemoBoros}
+                        />
                     </div>
 
-                    {/* 4. Boros Hedge (Demo Mock) */}
-                    {borosMock.enabled && (
-                        <div className={`p-3 rounded-sm border ${borosMock.isActive ? "bg-emerald-500/5 border-emerald-500/30" : "bg-zinc-500/5 border-zinc-500/30"}`}>
-                            <p className="text-[10px] uppercase tracking-wider text-neutral-400">Boros Hedge</p>
-                            <p className={`text-xs font-mono mt-1 ${borosMock.isActive ? "text-emerald-300" : "text-neutral-300"}`}>
-                                {borosMock.loading && !borosMock.error
-                                    ? "Checking mock Boros position..."
-                                    : borosMock.isActive
-                                        ? `Boros hedge active • ${borosMock.isLong ? "LONG" : "SHORT"} • ${borosMock.amountEth.toFixed(4)} ETH`
-                                        : "No Boros hedge"}
-                            </p>
-                            {borosMock.error && (
-                                <p className="text-[10px] mt-1 text-yellow-300/80 font-mono truncate">
-                                    mock read error: {borosMock.error}
-                                </p>
-                            )}
-                        </div>
-                    )}
+                    <div className="min-h-0 lg:col-span-3">
+                        <SavingsPortfolio latest={latest} hedges={hedges} loading={loading} title="SAVINGS PORTFOLIO" />
+                    </div>
 
-                    {/* 5. Execution Logs */}
-                    <div className="flex-1 min-h-0 relative overflow-hidden">
+                    <div className="min-h-0 lg:col-span-6">
                         <ExecutionConsole
                             aiLogs={aiLogs}
                             hedges={hedges}
@@ -162,8 +170,17 @@ export default function DashboardPage() {
                             loading={loading}
                         />
                     </div>
-                </div>
 
+                    <div className="min-h-0 lg:col-span-3">
+                        <YieldRiskGauge
+                            latest={latest}
+                            aiLogs={aiLogs}
+                            loading={loading}
+                            title="VOLATILITY INDEX"
+                            sourceLabel={null}
+                        />
+                    </div>
+                </div>
             </main>
         </DashboardLayout>
     );
