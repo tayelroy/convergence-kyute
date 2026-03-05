@@ -33,6 +33,7 @@ const KYUTE_VAULT_ABI = [
       { name: "confidenceBp", type: "uint256" },
       { name: "borosApr", type: "int256" },
       { name: "hedgeNotional", type: "uint256" },
+      { name: "oracleTimestamp", type: "uint256" },
       { name: "proofHash", type: "bytes32" },
     ],
     outputs: [],
@@ -180,6 +181,16 @@ const fetchHyperliquidFundingHistoryApr = async (
     const apr = await fallbackPredictedFundingApr(coin, baseUrl);
     return { apr, points: [] };
   }
+};
+
+const resolveOracleTimestamp = (points: HyperliquidFundingPoint[]): bigint => {
+  if (points.length === 0) return BigInt(Math.floor(Date.now() / 1000));
+
+  let latestMs = points[0].timestamp;
+  for (const point of points) {
+    if (point.timestamp > latestMs) latestMs = point.timestamp;
+  }
+  return BigInt(Math.floor(latestMs / 1000));
 };
 
 const fetchHyperliquidPositionSnapshot = async (
@@ -389,6 +400,7 @@ export const runKyuteWorkflowCycle = async (
   const proofDigest = keccak256(toBytes(proofPayload));
   const proofSignature = await account.signMessage({ message: { raw: proofDigest } });
   const proofHash = keccak256(toBytes(`${proofDigest}:${proofSignature}`));
+  const oracleTimestamp = resolveOracleTimestamp(funding.points);
 
   log(
     `Decision for ${PAIR}: funding1h=${averageFundingBp}bp, side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, mark=${position.markPrice.toFixed(4)}, hedgeNotional=${position.hedgeNotional.toFixed(4)}, borosAprBp=${borosAprBp}, confidence=${confidenceBp}bp -> shouldHedge=${shouldHedge}`,
@@ -424,6 +436,7 @@ export const runKyuteWorkflowCycle = async (
         BigInt(confidenceBp),
         BigInt(borosAprBp),
         BigInt(Math.round(position.hedgeNotional)),
+        oracleTimestamp,
         proofHash,
       ],
     });
