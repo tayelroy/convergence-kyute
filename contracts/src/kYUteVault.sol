@@ -3,9 +3,10 @@ pragma solidity ^0.8.19;
 
 import "@openzeppelin/contracts/token/ERC20/extensions/ERC4626.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IBorosRouter.sol";
 
-contract kYUteVault is ERC4626, Ownable {
+contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
     address public creCallbackOperator;
     IBorosRouter public borosRouter;
 
@@ -15,6 +16,8 @@ contract kYUteVault is ERC4626, Ownable {
     uint256 public constant MIN_CONFIDENCE_BP = 6000;
     // Spec requires 0.1% fee buffer (10 basis points)
     uint256 public constant FEE_BUFFER_BP = 10;
+    // Oracle inputs must be no older than 5 minutes.
+    uint256 public constant MAX_ORACLE_DELAY = 5 minutes;
 
     struct Position {
         address asset;
@@ -59,6 +62,7 @@ contract kYUteVault is ERC4626, Ownable {
     error InsufficientConfidence();
     error FeeBufferNotMet();
     error OnlyCRE();
+    error UserIdAlreadyMapped();
 
     modifier onlyCRE() {
         if (msg.sender != creCallbackOperator) revert OnlyCRE();
@@ -92,6 +96,10 @@ contract kYUteVault is ERC4626, Ownable {
     ) external {
         // In a real implementation we would execute or queue EIP-712 order for off-chain submission
         // For MVP, we simply track the position metadata.
+        address mappedUser = userIdToAddress[userId];
+        if (mappedUser != address(0) && mappedUser != msg.sender) {
+            revert UserIdAlreadyMapped();
+        }
         userIdToAddress[userId] = msg.sender;
 
         userPositions[msg.sender] = Position({
@@ -114,7 +122,7 @@ contract kYUteVault is ERC4626, Ownable {
         );
     }
 
-    function closeAllPositions(address user) external {
+    function closeAllPositions(address user) external nonReentrant {
         // Anyone can trigger for themselves, or perhaps an admin unwinds
         require(msg.sender == user || msg.sender == owner(), "Unauthorized");
 
@@ -124,8 +132,13 @@ contract kYUteVault is ERC4626, Ownable {
         // Note: the off-chain system should be notified to close Hyperliquid position.
 
         if (pos.hasBorosHedge) {
-            borosRouter.closePosition(user, pos.yuToken);
-            emit BorosHedgeClosed(user, pos.yuToken, pos.notional);
+            address hedgeToken = pos.yuToken;
+            // Effects before interaction to prevent stale-state reentrancy paths.
+            pos.hasBorosHedge = false;
+            pos.yuToken = address(0);
+
+            borosRouter.closePosition(user, hedgeToken);
+            emit BorosHedgeClosed(user, hedgeToken, pos.notional);
         }
 
         emit HyperliquidPositionClosed(user);
@@ -141,8 +154,9 @@ contract kYUteVault is ERC4626, Ownable {
         uint256 confidenceBp,
         int256 borosApr,
         uint256 hedgeNotional,
+        uint256 oracleTimestamp,
         bytes32 proofHash
-    ) external onlyCRE {
+    ) external onlyCRE nonReentrant {
         address user = userIdToAddress[userId];
         require(user != address(0), "User not found");
 
@@ -150,7 +164,10 @@ contract kYUteVault is ERC4626, Ownable {
         require(pos.notional > 0, "No open position");
 
         // 1. Check Oracle Staleness Guard (>5m)
-        if (block.timestamp > pos.lastUpdateTimestamp + 5 minutes) {
+        if (
+            oracleTimestamp > block.timestamp ||
+            block.timestamp - oracleTimestamp > MAX_ORACLE_DELAY
+        ) {
             revert OracleStaleness();
         }
 
@@ -181,21 +198,26 @@ contract kYUteVault is ERC4626, Ownable {
             // Long HL -> open Long YU; Short HL -> open Short YU
             bool hedgeIsLong = pos.isLong;
 
-            borosRouter.openPosition(user, yuToken, hedgeNotional, hedgeIsLong);
+            // Effects before interaction to prevent stale-state reentrancy paths.
             pos.hasBorosHedge = true;
             pos.yuToken = yuToken;
+            borosRouter.openPosition(user, yuToken, hedgeNotional, hedgeIsLong);
 
             emit BorosHedgeOpened(user, yuToken, hedgeNotional, hedgeIsLong);
         } else if (!shouldHedge && pos.hasBorosHedge) {
             // Close hedge
-            borosRouter.closePosition(user, pos.yuToken);
+            address hedgeToken = pos.yuToken;
+            // Effects before interaction to prevent stale-state reentrancy paths.
             pos.hasBorosHedge = false;
+            pos.yuToken = address(0);
 
-            emit BorosHedgeClosed(user, pos.yuToken, hedgeNotional);
+            borosRouter.closePosition(user, hedgeToken);
+
+            emit BorosHedgeClosed(user, hedgeToken, hedgeNotional);
         }
 
-        // Update timestamp to allow subsequent checks
-        pos.lastUpdateTimestamp = block.timestamp;
+        // Persist the latest oracle observation timestamp.
+        pos.lastUpdateTimestamp = oracleTimestamp;
 
         emit HedgeDecision(
             proofHash,
