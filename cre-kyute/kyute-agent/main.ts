@@ -335,6 +335,9 @@ type FundingHistoryEntry = {
   fundingRate?: number | string;
   funding?: number | string;
   rate?: number | string;
+  time?: number | string;
+  timestamp?: number | string;
+  t?: number | string;
 };
 
 type PositionSide = "long" | "short";
@@ -361,6 +364,7 @@ const KYUTE_VAULT_ABI = [
       { name: "confidenceBp", type: "uint256" },
       { name: "borosApr", type: "int256" },
       { name: "hedgeNotional", type: "uint256" },
+      { name: "oracleTimestamp", type: "uint256" },
       { name: "proofHash", type: "bytes32" },
     ],
     outputs: [],
@@ -420,7 +424,7 @@ const fetchAverageFundingBp = (
   requester: HTTPSendRequester,
   baseUrl: string,
   windowHours: number,
-): { averageFundingBp: number; observedFundingPoints: number } => {
+): { averageFundingBp: number; observedFundingPoints: number; latestFundingTimestampMs: number } => {
   const startTime = Date.now() - windowHours * 60 * 60 * 1000;
   const payload = JSON.stringify({
     type: "fundingHistory",
@@ -442,13 +446,26 @@ const fetchAverageFundingBp = (
   const jsonStr = new TextDecoder().decode(response.body);
   const data = JSON.parse(jsonStr) as FundingHistoryEntry[];
 
-  const rates = data
-    .map((entry) => Number(entry.fundingRate ?? entry.funding ?? entry.rate ?? NaN))
-    .filter((value) => Number.isFinite(value));
+  const points = data
+    .map((entry) => ({
+      rate: Number(entry.fundingRate ?? entry.funding ?? entry.rate ?? NaN),
+      timestampMs: Number(entry.time ?? entry.timestamp ?? entry.t ?? Date.now()),
+    }))
+    .filter((point) => Number.isFinite(point.rate));
+
+  const rates = points.map((point) => point.rate);
+  const latestFundingTimestampMs = points.reduce(
+    (latest, point) => (point.timestampMs > latest ? point.timestampMs : latest),
+    Date.now(),
+  );
 
   if (rates.length === 0) {
     const fallbackBp = fetchPredictedFundingBp(requester, HL_COIN, baseUrl);
-    return { averageFundingBp: fallbackBp, observedFundingPoints: 0 };
+    return {
+      averageFundingBp: fallbackBp,
+      observedFundingPoints: 0,
+      latestFundingTimestampMs: Date.now(),
+    };
   }
 
   const averageRate = rates.reduce((sum, value) => sum + value, 0) / rates.length;
@@ -456,6 +473,7 @@ const fetchAverageFundingBp = (
   return {
     averageFundingBp: Math.round(averageRate * 24 * 365 * 10_000),
     observedFundingPoints: rates.length,
+    latestFundingTimestampMs,
   };
 };
 
@@ -546,6 +564,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
 
   // DEMO OVERRIDE: force funding to be unfavorable so hedge opens.
   funding.averageFundingBp = 500; // +5% APR equivalent
+  const oracleTimestamp = BigInt(Math.floor(funding.latestFundingTimestampMs / 1000));
   const borosApr = http.sendRequest(runtime, estimateBorosApr, consensusIdenticalAggregation())(HL_COIN).result();
   const position = http
     .sendRequest(runtime, fetchHlPositionSnapshot, consensusIdenticalAggregation())(hlUrl, config.hlAddress)
@@ -611,6 +630,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       { type: "int256" },
       { type: "uint8" },
       { type: "uint256" },
+      { type: "uint256" },
       { type: "bytes32" }
     ],
     [
@@ -622,6 +642,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       BigInt(borosAprBp),
       position.positionSide === "long" ? 1 : 2,
       BigInt(Math.round(position.hedgeNotional)),
+      oracleTimestamp,
       proofHash
     ],
   )
@@ -652,6 +673,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
             BigInt(confidenceBp),
             BigInt(borosAprBp),
             BigInt(Math.round(position.hedgeNotional)),
+            oracleTimestamp,
             proofHash,
           ],
         });

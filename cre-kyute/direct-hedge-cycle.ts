@@ -37,6 +37,7 @@ const KYUTE_VAULT_ABI = [
       { name: "confidenceBp", type: "uint256" },
       { name: "borosApr", type: "int256" },
       { name: "hedgeNotional", type: "uint256" },
+      { name: "oracleTimestamp", type: "uint256" },
       { name: "proofHash", type: "bytes32" },
     ],
     outputs: [],
@@ -159,6 +160,7 @@ async function main() {
   const predictedAprBp = parseBigIntEnv("DEMO_PREDICTED_APR_BP", DEFAULT_PREDICTED_APR_BP);
   const confidenceBp = parseBigIntEnv("DEMO_CONFIDENCE_BP", DEFAULT_CONFIDENCE_BP);
   const borosAprBp = parseBigIntEnv("DEMO_BOROS_APR_BP", DEFAULT_BOROS_APR_BP);
+  const oracleTimestamp = parseBigIntEnv("DEMO_ORACLE_TIMESTAMP", BigInt(Math.floor(Date.now() / 1000)));
   const shouldHedge = parseBoolEnv("DEMO_SHOULD_HEDGE", true);
   const proofHash = (process.env.DEMO_PROOF_HASH ?? DEFAULT_PROOF_HASH) as `0x${string}`;
 
@@ -225,6 +227,7 @@ async function main() {
       confidenceBp,
       borosAprBp,
       hedgeNotionalWei,
+      oracleTimestamp,
       proofHash,
     ],
   });
