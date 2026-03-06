@@ -2,7 +2,7 @@
 "use client";
 
 import React from "react";
-import { PieChart, Pie, Cell, ResponsiveContainer } from "recharts";
+import { PieChart, Pie, Cell } from "recharts";
 import type { AiDecision, AgentSnapshot } from "@/hooks/useAgentStatus";
 
 interface YieldRiskGaugeProps {
@@ -39,25 +39,23 @@ export function YieldRiskGauge({
                 {sourceLabel && <span className="text-[10px] text-[#444] font-mono uppercase">{sourceLabel}</span>}
             </div>
 
-            <div className="relative w-[120px] h-[120px]">
-                <ResponsiveContainer width="100%" height="100%">
-                    <PieChart>
-                        <Pie
-                            data={data}
-                            cx="50%"
-                            cy="50%"
-                            innerRadius={40}
-                            outerRadius={55}
-                            startAngle={180}
-                            endAngle={0}
-                            paddingAngle={5}
-                            dataKey="value"
-                        >
-                            <Cell key="risk" fill="#ef4444" />
-                            <Cell key="safety" fill="#1a1a1a" />
-                        </Pie>
-                    </PieChart>
-                </ResponsiveContainer>
+            <div className="relative h-[120px] w-[120px] shrink-0">
+                <PieChart width={120} height={120}>
+                    <Pie
+                        data={data}
+                        cx="50%"
+                        cy="50%"
+                        innerRadius={40}
+                        outerRadius={55}
+                        startAngle={180}
+                        endAngle={0}
+                        paddingAngle={5}
+                        dataKey="value"
+                    >
+                        <Cell key="risk" fill="#ef4444" />
+                        <Cell key="safety" fill="#1a1a1a" />
+                    </Pie>
+                </PieChart>
                 <div className="absolute top-[60%] left-1/2 -translate-x-1/2 -translate-y-1/2 text-center">
                     <span className="block text-2xl font-bold font-mono text-white">
                         {loading ? "--" : Math.round(gaugeValue)}
