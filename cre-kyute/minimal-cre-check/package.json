@@ -1,0 +1,7 @@
+{
+  "name": "minimal-cre-check",
+  "private": true,
+  "dependencies": {
+    "@chainlink/cre-sdk": "^1.0.9"
+  }
+}

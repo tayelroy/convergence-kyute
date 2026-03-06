@@ -1,0 +1,6 @@
+staging-settings:
+  user-workflow:
+    workflow-name: "minimal-boros-import-check"
+  workflow-artifacts:
+    workflow-path: "./main.ts"
+    config-path: "./config.staging.json"
