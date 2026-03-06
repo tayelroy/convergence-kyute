@@ -1,167 +1,91 @@
 import { NextResponse } from "next/server";
+import fs from "fs";
+import path from "path";
 import { createClient } from "@supabase/supabase-js";
+import { fetchBorosImpliedAprQuote } from "@/lib/boros";
+
+export const runtime = "nodejs";
 
 type PredictedFundingVenue = [string, { fundingRate: string; nextFundingTime?: number } | null];
 type PredictedFundingRow = [string, PredictedFundingVenue[]];
 
 const HL_INFO_MAINNET = "https://api.hyperliquid.xyz/info";
-const BOROS_CORE_API_BASE = process.env.BOROS_CORE_API_URL ?? "https://api-v2.pendle.finance";
-const BOROS_MARKET_ADDRESS =
-  process.env.BOROS_MARKET_ADDRESS ?? process.env.NEXT_PUBLIC_BOROS_MARKET_ADDRESS ?? "";
-const BOROS_MARKET_ID = Number(process.env.BOROS_MARKET_ID ?? NaN);
+const DEFAULT_BOROS_MARKET_ADDRESS = "0x8db1397beb16a368711743bc42b69904e4e82122";
 const SYNC_MIN_INTERVAL_MS = 60_000;
-
-let cachedBorosLookup: { base: string; marketId: number } | null = null;
 
 const minuteBucketIso = () => new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
 
-const normalizeApr = (value: number): number => {
-  if (!Number.isFinite(value)) return 0;
-  // API may return percent (e.g. 12.3) or decimal (e.g. 0.123).
-  return value > 3 ? value : value * 100;
-};
+let cachedRootEnv: Record<string, string> | null = null;
 
-const matchesBorosMarket = (market: Record<string, unknown>, coin: string, targetAddress: string): boolean => {
-  const address = String(market?.address ?? "").toLowerCase();
-  if (targetAddress && address === targetAddress) return true;
-  const metadata = (market?.metadata ?? {}) as Record<string, unknown>;
-  const imData = (market?.imData ?? {}) as Record<string, unknown>;
-  const assetSymbol = String(metadata.assetSymbol ?? "").toUpperCase();
-  const fundingRateSymbol = String(metadata.fundingRateSymbol ?? "").toUpperCase();
-  const marketSymbol = String(imData.symbol ?? "").toUpperCase();
-  const normalizedCoin = coin.toUpperCase();
-  return (
-    assetSymbol === normalizedCoin ||
-    fundingRateSymbol === normalizedCoin ||
-    marketSymbol.includes(normalizedCoin)
-  );
-};
-
-const extractAprFromMarket = (market: Record<string, unknown>): number => {
-  const data = (market.data ?? {}) as Record<string, unknown>;
-  const raw = Number(data.ammImpliedApr ?? data.markApr ?? NaN);
-  if (!Number.isFinite(raw)) {
-    throw new Error(`Selected Boros market has no implied APR (market=${String(market.address ?? "unknown")})`);
-  }
-  return normalizeApr(raw);
-};
-
-const parseMarketFromPayload = (payload: unknown): Record<string, unknown> | null => {
-  if (!payload || typeof payload !== "object") return null;
-  const maybe = payload as Record<string, unknown>;
-  if (maybe.address || maybe.data || maybe.metadata || maybe.imData) return maybe;
-  if (maybe.result && typeof maybe.result === "object") return maybe.result as Record<string, unknown>;
-  if (maybe.data && typeof maybe.data === "object") return maybe.data as Record<string, unknown>;
-  return null;
-};
-
-const fetchBorosImpliedApr = async (coin: string): Promise<{ impliedAprPct: number; marketAddress: string }> => {
-  const bases = Array.from(
-    new Set([
-      BOROS_CORE_API_BASE.replace(/\/+$/, ""),
-      "https://api-v2.pendle.finance",
-      "https://api.boros.finance",
-    ]),
-  );
-  const candidates = bases.flatMap((base) => [`${base}/core/v1/markets`, `${base}/v1/markets`, `${base}/markets`]);
-
-  const targetAddress = BOROS_MARKET_ADDRESS.toLowerCase();
-  let response: Response | null = null;
-  let lastError = "";
-
-  const tryById = async (base: string, id: number): Promise<{ impliedAprPct: number; marketAddress: string } | null> => {
-    const byIdUrl = `${base}/core/v1/markets/${id}`;
-    const res = await fetch(byIdUrl, { method: "GET", headers: { accept: "application/json" } });
-    if (!res.ok) {
-      const body = await res.text();
-      lastError = `${byIdUrl} -> ${res.status}: ${body}`;
-      return null;
+const parseEnvFile = (contents: string): Record<string, string> => {
+  const entries: Record<string, string> = {};
+  for (const rawLine of contents.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    if (!line || line.startsWith("#")) continue;
+    const normalized = line.startsWith("export ") ? line.slice(7).trim() : line;
+    const separatorIndex = normalized.indexOf("=");
+    if (separatorIndex <= 0) continue;
+    const key = normalized.slice(0, separatorIndex).trim();
+    let value = normalized.slice(separatorIndex + 1).trim();
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
     }
-    const payload = (await res.json()) as unknown;
-    const market = parseMarketFromPayload(payload);
-    if (!market) {
-      lastError = `${byIdUrl} -> 200 but payload format unsupported`;
-      return null;
-    }
-    if (!matchesBorosMarket(market, coin, targetAddress)) return null;
-    cachedBorosLookup = { base, marketId: id };
-    return {
-      impliedAprPct: extractAprFromMarket(market),
-      marketAddress: String(market.address || BOROS_MARKET_ADDRESS || "unknown"),
-    };
-  };
-
-  // Fast path: re-use discovered market lookup.
-  if (cachedBorosLookup) {
-    const fast = await tryById(cachedBorosLookup.base, cachedBorosLookup.marketId);
-    if (fast) return fast;
+    entries[key] = value;
   }
+  return entries;
+};
 
-  // If configured, prefer direct market-id lookup first.
-  if (Number.isFinite(BOROS_MARKET_ID) && BOROS_MARKET_ID > 0) {
-    for (const base of bases) {
-      const direct = await tryById(base, BOROS_MARKET_ID);
-      if (direct) return direct;
-    }
-  }
+const readRootEnv = (): Record<string, string> => {
+  if (cachedRootEnv) return cachedRootEnv;
+
+  const candidates = [path.resolve(process.cwd(), ".env"), path.resolve(process.cwd(), "..", ".env")];
   for (const candidate of candidates) {
-    const url = new URL(candidate);
-    url.searchParams.set("isWhitelisted", "true");
-    url.searchParams.set("limit", "200");
-    const res = await fetch(url.toString(), {
-      method: "GET",
-      headers: { accept: "application/json" },
-    });
-    if (res.ok) {
-      response = res;
-      break;
-    }
-    const body = await res.text();
-    lastError = `${url.toString()} -> ${res.status}: ${body}`;
+    if (!fs.existsSync(candidate)) continue;
+    cachedRootEnv = parseEnvFile(fs.readFileSync(candidate, "utf8"));
+    return cachedRootEnv;
   }
 
-  if (response) {
-    const payload = (await response.json()) as unknown;
-    const root = payload as
-      | { results?: unknown[]; data?: { results?: unknown[] } }
-      | unknown[]
-      | undefined;
-    const markets = Array.isArray(root)
-      ? root
-      : Array.isArray(root?.results)
-      ? root.results
-      : Array.isArray(root?.data?.results)
-      ? root.data.results
-      : [];
-    if (markets.length > 0) {
-      const selected = (markets as Array<Record<string, unknown>>).find((market) =>
-        matchesBorosMarket(market, coin, targetAddress),
-      );
-      if (selected) {
-        return {
-          impliedAprPct: extractAprFromMarket(selected),
-          marketAddress: String(selected.address || BOROS_MARKET_ADDRESS || "unknown"),
-        };
-      }
-    }
+  cachedRootEnv = {};
+  return cachedRootEnv;
+};
+
+const readServerEnv = (key: string): string | undefined => {
+  const processValue = process.env[key]?.trim();
+  if (processValue) return processValue;
+  const rootValue = readRootEnv()[key]?.trim();
+  if (rootValue) return rootValue;
+  return undefined;
+};
+
+const BOROS_MARKET_ADDRESS = (
+  readServerEnv("BOROS_MARKET_ADDRESS") ??
+  readServerEnv("NEXT_PUBLIC_BOROS_MARKET_ADDRESS") ??
+  DEFAULT_BOROS_MARKET_ADDRESS
+).toLowerCase();
+const BOROS_CORE_API_URL = readServerEnv("BOROS_CORE_API_URL");
+
+const formatSyncError = (error: unknown): string => {
+  if (!error || typeof error !== "object") {
+    return typeof error === "string" ? error : "rates sync failed";
   }
 
-  // Fallback path: endpoint may only expose /markets/:id.
-  const idCandidates =
-    Number.isFinite(BOROS_MARKET_ID) && BOROS_MARKET_ID > 0
-      ? [BOROS_MARKET_ID]
-      : Array.from({ length: 60 }, (_, i) => i + 1);
+  const maybeAxios = error as {
+    message?: string;
+    response?: { status?: number; data?: unknown };
+  };
+  const status = maybeAxios.response?.status;
+  const data = maybeAxios.response?.data;
 
-  let lastIdError = lastError;
-  for (const base of bases) {
-    for (const id of idCandidates) {
-      const byId = await tryById(base, id);
-      if (byId) return byId;
-      lastIdError = lastError;
-    }
+  if (status && data !== undefined) {
+    const payload = typeof data === "string" ? data : JSON.stringify(data);
+    return `${maybeAxios.message ?? "rates sync failed"} (status=${status}, data=${payload})`;
   }
 
-  throw new Error(`Boros API failed on list and id endpoints. Last error: ${lastIdError}`);
+  if (maybeAxios.message) return maybeAxios.message;
+  return "rates sync failed";
 };
 
 export async function GET() {
@@ -178,6 +102,16 @@ export async function GET() {
     const supabase = createClient(supabaseUrl, supabaseKey);
 
     const readLatest = async () => {
+      const latestBorosQuery = supabase
+        .from("boros_implied_rates")
+        .select("timestamp,asset_symbol,market_address,implied_apr,source")
+        .eq("network", "mainnet")
+        .eq("asset_symbol", "ETH")
+        .eq("market_address", BOROS_MARKET_ADDRESS)
+        .order("timestamp", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
       const [{ data: latestFunding, error: latestFundingError }, { data: latestBoros, error: latestBorosError }] =
         await Promise.all([
           supabase
@@ -189,14 +123,7 @@ export async function GET() {
             .order("timestamp", { ascending: false })
             .limit(1)
             .maybeSingle(),
-          supabase
-            .from("boros_implied_rates")
-            .select("timestamp,asset_symbol,market_address,implied_apr,source")
-            .eq("network", "mainnet")
-            .eq("asset_symbol", "ETH")
-            .order("timestamp", { ascending: false })
-            .limit(1)
-            .maybeSingle(),
+          latestBorosQuery,
         ]);
 
       if (latestFundingError) {
@@ -206,7 +133,7 @@ export async function GET() {
         throw new Error(`Supabase latest boros read failed: ${latestBorosError.message}`);
       }
       const resolvedBoros = latestBoros;
-      const borosSourcePath = latestBoros ? "boros_implied_rates_mainnet" : "none";
+      const borosSourcePath = latestBoros ? "boros_implied_rates_market" : "none";
       return { latestFunding, latestBoros: resolvedBoros, borosSourcePath };
     };
 
@@ -277,15 +204,18 @@ export async function GET() {
         throw new Error(`Supabase hl_funding_rates upsert failed: ${fundingUpsertError.message}`);
       }
 
-      // 2) Pull latest Boros implied APR directly from Boros Core API and persist.
-      const borosLive = await fetchBorosImpliedApr("ETH");
+      // 2) Pull latest Boros implied APR via the Boros SDK and persist.
+      const borosLive = await fetchBorosImpliedAprQuote("ETH", {
+        marketAddress: BOROS_MARKET_ADDRESS,
+        coreApiUrl: BOROS_CORE_API_URL,
+      });
       const impliedRow = {
         timestamp: minuteBucketIso(),
         network: "mainnet",
-        market_address: borosLive.marketAddress,
+        market_address: borosLive.marketAddress.toLowerCase(),
         asset_symbol: "ETH",
         implied_apr: borosLive.impliedAprPct,
-        source: "boros_core_api_v1_markets",
+        source: "boros_sdk",
       };
       const { error: impliedUpsertError } = await supabase
         .from("boros_implied_rates")
@@ -294,7 +224,7 @@ export async function GET() {
         throw new Error(`Supabase boros_implied_rates upsert failed: ${impliedUpsertError.message}`);
       }
     } catch (syncError) {
-      syncWarning = syncError instanceof Error ? syncError.message : "rates sync failed";
+      syncWarning = formatSyncError(syncError);
     }
 
     // 3) Return latest persisted values (post-sync or cached fallback).
@@ -306,11 +236,12 @@ export async function GET() {
       warning:
         syncWarning ??
         (!(latest.latestBoros ?? initial.latestBoros)
-          ? "No Boros source found from boros core API or boros_implied_rates."
+          ? "No Boros source found from the SDK or boros_implied_rates."
           : null),
       cached: hasInitial,
       debug: {
         borosSourcePath: latest.borosSourcePath,
+        borosMarketAddress: BOROS_MARKET_ADDRESS,
       },
     });
   } catch (error) {
