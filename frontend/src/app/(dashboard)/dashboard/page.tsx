@@ -9,9 +9,10 @@ import { YieldRiskGauge } from "@/components/dashboard/YieldRiskGauge";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
 import { UserPositionHistoryChart } from "@/components/dashboard/UserPositionHistoryChart";
 import { BorosHedgeChart } from "@/components/dashboard/BorosHedgeChart";
+import type { AgentSnapshot } from "@/hooks/useAgentStatus";
 import { useAgentStatus } from "@/hooks/useAgentStatus";
-import { useBorosMockHedge } from "@/hooks/useBorosMockHedge";
 import { useHyperliquidDashboard } from "@/hooks/use-hyperliquid-dashboard";
+import { useKyuteVaultState } from "@/hooks/use-kyute-vault-state";
 import { getCachedWalletAddress } from "@/lib/hl-wallet-cache";
 
 export default function DashboardPage() {
@@ -31,12 +32,11 @@ export default function DashboardPage() {
         lastUpdated,
     } = useAgentStatus();
     const live = useHyperliquidDashboard();
-    const isForcedExecutionMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
     const borosWallet = useMemo(
         () => account?.address ?? getCachedWalletAddress() ?? undefined,
         [account?.address],
     );
-    const liveBoros = useBorosMockHedge(isForcedExecutionMode ? borosWallet : undefined);
+    const liveVault = useKyuteVaultState(borosWallet);
     const borosAprDisplay =
         live.borosImpliedApr != null ? `${live.borosImpliedApr.toFixed(2)}%` : loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay = live.hlFundingApr != null ? `${live.hlFundingApr.toFixed(2)}%` : latest ? `${latest.hl_apr.toFixed(2)}%` : "--";
@@ -49,23 +49,32 @@ export default function DashboardPage() {
         ? liveRunningHedgeEth
         : Number(latestHedge?.amount_eth ?? 0);
     const derivedHedgeAmountYu = Number.isFinite(fallbackLiveHedgeAmountYu) ? Math.max(0, fallbackLiveHedgeAmountYu) : 0;
-    const hedgeAmountYu =
-        isForcedExecutionMode && liveBoros.enabled
-            ? Math.max(0, Number(liveBoros.amountYu ?? 0))
-            : derivedHedgeAmountYu;
-    const hasHedge = hedgeAmountYu > 0.0000001;
+    const liveHedgeAmountYu = Math.max(0, Number(liveVault.currentHedgeAmountYu ?? 0));
+    const hedgeAmountYu = liveVault.configured ? liveHedgeAmountYu : derivedHedgeAmountYu;
+    const hasHedge = liveVault.configured ? liveVault.hasBorosHedge && hedgeAmountYu > 0.0000001 : hedgeAmountYu > 0.0000001;
     const hedgeSide = hasHedge
-        ? isForcedExecutionMode && liveBoros.enabled
-            ? liveBoros.isLong
+        ? liveVault.configured
+            ? liveVault.currentHedgeIsLong
                 ? "LONG"
                 : "SHORT"
             : (latestHedge?.hedge_side ?? null)
         : null;
-    const hedgeLastTimestamp =
-        isForcedExecutionMode && liveBoros.enabled
-            ? lastUpdated
-            : (latestHedge?.timestamp ?? null);
+    const hedgeLastTimestamp = liveVault.positionLastUpdate
+        ? new Date(liveVault.positionLastUpdate).toISOString()
+        : (latestHedge?.timestamp ?? null);
     const [zeroSeriesSeed] = useState(() => Date.now());
+    const latestSnapshot: AgentSnapshot | null = latest ?? (
+        liveVault.configured
+            ? {
+                timestamp: new Date().toISOString(),
+                asset_symbol: "ETH",
+                boros_apr: live.borosImpliedApr ?? 0,
+                hl_apr: live.hlFundingApr ?? 0,
+                spread_bps: live.hlSpreadBps ?? 0,
+                vault_balance_eth: liveVault.totalAssetsEth,
+            }
+            : null
+    );
     const hedgeHistoryPoints = useMemo(() => {
         const sorted = [...hedges].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
         const points: Array<{ timestamp: number; amountYu: number }> = [];
@@ -82,8 +91,8 @@ export default function DashboardPage() {
             points.push({ timestamp: ts, amountYu: Number.isFinite(amt) ? Math.max(0, amt) : 0 });
         }
 
-        if (isForcedExecutionMode && liveBoros.enabled) {
-            const currentAmountYu = Math.max(0, Number(liveBoros.amountYu ?? 0));
+        if (liveVault.configured) {
+            const currentAmountYu = Math.max(0, Number(liveVault.currentHedgeAmountYu ?? 0));
             const currentPointTs = hedgeLastTimestamp
                 ? new Date(hedgeLastTimestamp).getTime()
                 : zeroSeriesSeed;
@@ -98,8 +107,8 @@ export default function DashboardPage() {
             { timestamp: zeroSeriesSeed - 30 * 60 * 1000, amountYu: 0 },
             { timestamp: zeroSeriesSeed, amountYu: 0 },
         ];
-    }, [hedges, hedgeLastTimestamp, isForcedExecutionMode, liveBoros.amountYu, liveBoros.enabled, zeroSeriesSeed]);
-    const spreadBps = live.hlSpreadBps ?? latest?.spread_bps ?? null;
+    }, [hedges, hedgeLastTimestamp, liveVault.configured, liveVault.currentHedgeAmountYu, zeroSeriesSeed]);
+    const spreadBps = live.hlSpreadBps ?? latestSnapshot?.spread_bps ?? null;
     const yieldAlert = spreadBps != null
         ? `Spread is ${spreadBps.toFixed(1)} bps (HL ${hlAprDisplay} vs Boros ${borosAprDisplay}); ${hasHedge ? `hedge is active${hedgeSide ? ` (${hedgeSide})` : ""}.` : "no hedge is open."}`
         : "Spread and hedge decision will appear after the first live cycle.";
@@ -111,9 +120,9 @@ export default function DashboardPage() {
     return (
         <DashboardLayout className="min-h-full">
             <TickerTape
-                borosRate={live.borosImpliedApr ?? latest?.boros_apr}
+                borosRate={live.borosImpliedApr ?? latestSnapshot?.boros_apr}
                 hyperliquidRate={live.hlFundingApr}
-                spreadBps={live.hlSpreadBps ?? latest?.spread_bps}
+                spreadBps={live.hlSpreadBps ?? latestSnapshot?.spread_bps}
                 lastSyncLabel={syncLabel}
                 degraded={degraded}
             />
@@ -181,7 +190,7 @@ export default function DashboardPage() {
                     </div>
 
                     <div className="min-h-[300px] lg:col-span-3">
-                        <SavingsPortfolio latest={latest} hedges={hedges} loading={loading} title="SAVINGS PORTFOLIO" />
+                        <SavingsPortfolio latest={latestSnapshot} hedges={hedges} loading={loading} title="SAVINGS PORTFOLIO" />
                     </div>
 
                     <div className="min-h-[300px] lg:col-span-6">
@@ -198,7 +207,7 @@ export default function DashboardPage() {
 
                     <div className="min-h-[300px] min-w-0 lg:col-span-3">
                         <YieldRiskGauge
-                            latest={latest}
+                            latest={latestSnapshot}
                             aiLogs={aiLogs}
                             loading={loading}
                             title="VOLATILITY INDEX"
