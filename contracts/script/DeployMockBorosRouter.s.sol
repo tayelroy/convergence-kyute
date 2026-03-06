@@ -9,13 +9,8 @@ import {MockBorosRouter} from "../src/mocks/MockBorosRouter.sol";
  */
 contract DeployMockBorosRouter is Script {
     function run() external returns (MockBorosRouter router) {
-        uint256 deployerPrivateKey = vm.envOr("PRIVATE_KEY", uint256(0));
-
-        if (deployerPrivateKey == 0) {
-            vm.startBroadcast();
-        } else {
-            vm.startBroadcast(deployerPrivateKey);
-        }
+        // Let the forge CLI control the broadcast signer via --private-key/--sender.
+        vm.startBroadcast();
 
         router = new MockBorosRouter();
 
