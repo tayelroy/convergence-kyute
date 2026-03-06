@@ -1,6 +1,7 @@
 "use client";
 
 import React, { useMemo, useState } from "react";
+import { useActiveAccount } from "thirdweb/react";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { TickerTape } from "@/components/dashboard/TickerTape";
 import { SavingsPortfolio } from "@/components/dashboard/SavingsPortfolio";
@@ -9,9 +10,9 @@ import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
 import { UserPositionHistoryChart } from "@/components/dashboard/UserPositionHistoryChart";
 import { BorosHedgeChart } from "@/components/dashboard/BorosHedgeChart";
 import { useAgentStatus } from "@/hooks/useAgentStatus";
-import { useHyperliquidDashboard } from "@/hooks/use-hyperliquid-dashboard";
 import { useBorosMockHedge } from "@/hooks/useBorosMockHedge";
-import { useActiveAccount } from "thirdweb/react";
+import { useHyperliquidDashboard } from "@/hooks/use-hyperliquid-dashboard";
+import { getCachedWalletAddress } from "@/lib/hl-wallet-cache";
 
 export default function DashboardPage() {
     const account = useActiveAccount();
@@ -30,7 +31,12 @@ export default function DashboardPage() {
         lastUpdated,
     } = useAgentStatus();
     const live = useHyperliquidDashboard();
-    const borosMock = useBorosMockHedge(account?.address);
+    const isForcedExecutionMode = process.env.NEXT_PUBLIC_DEMO_MODE === "true";
+    const borosWallet = useMemo(
+        () => account?.address ?? getCachedWalletAddress() ?? undefined,
+        [account?.address],
+    );
+    const liveBoros = useBorosMockHedge(isForcedExecutionMode ? borosWallet : undefined);
     const borosAprDisplay =
         live.borosImpliedApr != null ? `${live.borosImpliedApr.toFixed(2)}%` : loading ? "..." : latest ? `${latest.boros_apr.toFixed(2)}%` : "--";
     const hlAprDisplay = live.hlFundingApr != null ? `${live.hlFundingApr.toFixed(2)}%` : latest ? `${latest.hl_apr.toFixed(2)}%` : "--";
@@ -39,41 +45,58 @@ export default function DashboardPage() {
     const positionLastPoint = live.historyPoints[live.historyPoints.length - 1] ?? null;
     const hlPositionLastUpdated = live.positionLastUpdate ?? positionLastPoint?.timestamp ?? null;
 
-    const usingDemoBoros = borosMock.enabled && Boolean(account?.address);
-    const fallbackLiveHedgeAmountEth = Number.isFinite(liveRunningHedgeEth)
+    const fallbackLiveHedgeAmountYu = Number.isFinite(liveRunningHedgeEth)
         ? liveRunningHedgeEth
         : Number(latestHedge?.amount_eth ?? 0);
-    const hedgeAmountEth = usingDemoBoros ? borosMock.amountEth : fallbackLiveHedgeAmountEth;
-    const hedgeSide = usingDemoBoros
-        ? (borosMock.isLong ? "LONG" : "SHORT")
-        : hedgeAmountEth > 0
-            ? live.positionSide
-            : null;
-    const hasHedge = usingDemoBoros ? borosMock.isActive : hedgeAmountEth > 0.0000001;
-    const hedgeLastTimestamp = latestHedge?.timestamp ?? null;
-    const [demoSeriesSeed] = useState(() => Date.now());
+    const derivedHedgeAmountYu = Number.isFinite(fallbackLiveHedgeAmountYu) ? Math.max(0, fallbackLiveHedgeAmountYu) : 0;
+    const hedgeAmountYu =
+        isForcedExecutionMode && liveBoros.enabled
+            ? Math.max(0, Number(liveBoros.amountYu ?? 0))
+            : derivedHedgeAmountYu;
+    const hasHedge = hedgeAmountYu > 0.0000001;
+    const hedgeSide = hasHedge
+        ? isForcedExecutionMode && liveBoros.enabled
+            ? liveBoros.isLong
+                ? "LONG"
+                : "SHORT"
+            : (latestHedge?.hedge_side ?? null)
+        : null;
+    const hedgeLastTimestamp =
+        isForcedExecutionMode && liveBoros.enabled
+            ? lastUpdated
+            : (latestHedge?.timestamp ?? null);
+    const [zeroSeriesSeed] = useState(() => Date.now());
     const hedgeHistoryPoints = useMemo(() => {
-        if (usingDemoBoros) {
-            return [
-                { timestamp: demoSeriesSeed - 60 * 60 * 1000, amountEth: 0 },
-                { timestamp: demoSeriesSeed, amountEth: hedgeAmountEth },
-            ];
-        }
         const sorted = [...hedges].sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
-        const points: Array<{ timestamp: number; amountEth: number }> = [];
+        const points: Array<{ timestamp: number; amountYu: number }> = [];
         for (const h of sorted) {
+            if (String(h.status ?? "").toLowerCase() !== "success") continue;
             const ts = new Date(h.timestamp).getTime();
             if (!Number.isFinite(ts)) continue;
             const running = Number(h.running_size_eth);
             if (Number.isFinite(running)) {
-                points.push({ timestamp: ts, amountEth: Math.max(0, running) });
+                points.push({ timestamp: ts, amountYu: Math.max(0, running) });
                 continue;
             }
             const amt = Number(h.amount_eth ?? 0);
-            points.push({ timestamp: ts, amountEth: Number.isFinite(amt) ? Math.max(0, amt) : 0 });
+            points.push({ timestamp: ts, amountYu: Number.isFinite(amt) ? Math.max(0, amt) : 0 });
         }
-        return points;
-    }, [demoSeriesSeed, hedges, hedgeAmountEth, usingDemoBoros]);
+
+        if (isForcedExecutionMode && liveBoros.enabled) {
+            const currentAmountYu = Math.max(0, Number(liveBoros.amountYu ?? 0));
+            const now = Date.now();
+            const lastPoint = points[points.length - 1] ?? null;
+            if (!lastPoint || Math.abs(lastPoint.amountYu - currentAmountYu) > 0.0000001) {
+                points.push({ timestamp: now, amountYu: currentAmountYu });
+            }
+        }
+
+        if (points.length > 0) return points;
+        return [
+            { timestamp: zeroSeriesSeed - 30 * 60 * 1000, amountYu: 0 },
+            { timestamp: zeroSeriesSeed, amountYu: 0 },
+        ];
+    }, [hedges, isForcedExecutionMode, liveBoros.amountYu, liveBoros.enabled, zeroSeriesSeed]);
     const spreadBps = live.hlSpreadBps ?? latest?.spread_bps ?? null;
     const yieldAlert = spreadBps != null
         ? `Spread is ${spreadBps.toFixed(1)} bps (HL ${hlAprDisplay} vs Boros ${borosAprDisplay}); ${hasHedge ? `hedge is active${hedgeSide ? ` (${hedgeSide})` : ""}.` : "no hedge is open."}`
@@ -147,11 +170,11 @@ export default function DashboardPage() {
                     <div className="min-h-0 lg:col-span-6">
                         <BorosHedgeChart
                             points={hedgeHistoryPoints}
-                            currentAmountEth={hedgeAmountEth}
-                            hedgeSide={hasHedge ? hedgeSide ?? "LONG" : null}
+                            currentAmountYu={hedgeAmountYu}
+                            hedgeSide={hasHedge ? hedgeSide : null}
                             lastUpdatedAt={hedgeLastTimestamp ? new Date(hedgeLastTimestamp).toLocaleString() : null}
                             loading={loading}
-                            isDemo={usingDemoBoros}
+                            modeLabel={isForcedExecutionMode ? "Forced execution mode" : null}
                         />
                     </div>
 

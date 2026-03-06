@@ -114,7 +114,7 @@ export function ExecutionConsole({
                         </div>
                         <div className="mt-1 flex items-center gap-3 flex-wrap text-[10px] text-[#7adbb2]">
                             {log.amountEth != null && (
-                                <span>amount={log.amountEth.toFixed(4)} ETH</span>
+                                <span>amount={log.amountEth.toFixed(4)} {log.action.startsWith("BOROS") ? "YU" : "ETH"}</span>
                             )}
                             {log.txHash && (
                                 <span className="text-[#666] truncate max-w-[280px]">tx={log.txHash}</span>

@@ -11,14 +11,24 @@ import {
 } from "@chainlink/cre-sdk";
 import { formatPrice, formatSize } from "@nktkas/hyperliquid/utils";
 import {
+  createPublicClient,
   createWalletClient,
   encodeAbiParameters,
   encodeFunctionData,
+  parseEther,
   http as viemHttp,
   keccak256,
   toBytes,
+  type Address,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import {
+  computeHedgePolicy,
+  type HedgeMode,
+  type PositionSide,
+} from "../hedge-policy.js";
+import { fetchBorosImpliedAprQuote } from "../boros.js";
+import { readWalletBridgeRecord, resolveWalletUserId } from "../wallet-bridge.js";
 
 type PerpSide = "buy" | "sell";
 type PerpOrderType = "market" | "limit";
@@ -323,7 +333,18 @@ type Config = {
   hlAddress?: string;
   hlTestnet?: boolean;
   hlBaseUrl?: string;
+  hlFundingTestnet?: boolean;
+  hlFundingBaseUrl?: string;
+  hlPositionTestnet?: boolean;
+  hlPositionBaseUrl?: string;
   thresholdBp?: number;
+  entryThresholdBp?: number;
+  exitThresholdBp?: number;
+  hedgeMode?: HedgeMode;
+  hedgeNotionalUseMarkPrice?: boolean;
+  borosOiFeeBp?: number;
+  borosMarketAddress?: string;
+  borosCoreApiUrl?: string;
   windowHours?: number;
   callbackPrivateKey?: `0x${string}`;
   rpcUrl?: string;
@@ -340,18 +361,33 @@ type FundingHistoryEntry = {
   t?: number | string;
 };
 
-type PositionSide = "long" | "short";
-
 const PAIR = "ETHUSDC";
 const HL_COIN = "ETH";
-const THRESHOLD_BP = 10;
 const WINDOW_HOURS = 1;
-const FEE_BUFFER_BP = 10;
 const MIN_CONFIDENCE_BP = 6000;
+const DEFAULT_ENTRY_THRESHOLD_BP = 40;
+const DEFAULT_EXIT_THRESHOLD_BP = 10;
+const DEFAULT_BOROS_OI_FEE_BP = 10;
 const DEFAULT_ANVIL_RPC_URL = "http://localhost:8545";
 const DEFAULT_ANVIL_PRIVATE_KEY =
   "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d";
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const KYUTE_VAULT_ABI = [
+  {
+    type: "function",
+    name: "syncHyperliquidPosition",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "userId", type: "uint256" },
+      { name: "isLong", type: "bool" },
+      { name: "notional", type: "uint256" },
+      { name: "leverage", type: "uint256" },
+      { name: "targetHedgeNotional", type: "uint256" },
+      { name: "targetHedgeIsLong", type: "bool" },
+      { name: "oracleTimestamp", type: "uint256" },
+    ],
+    outputs: [],
+  },
   {
     type: "function",
     name: "executeHedge",
@@ -369,23 +405,123 @@ const KYUTE_VAULT_ABI = [
     ],
     outputs: [],
   },
+  {
+    type: "function",
+    name: "syncUserAddress",
+    stateMutability: "nonpayable",
+    inputs: [
+      { name: "userId", type: "uint256" },
+      { name: "user", type: "address" },
+    ],
+    outputs: [],
+  },
+  {
+    type: "function",
+    name: "creCallbackOperator",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
+    name: "userIdToAddress",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "uint256" }],
+    outputs: [{ name: "", type: "address" }],
+  },
+  {
+    type: "function",
+    name: "userPositions",
+    stateMutability: "view",
+    inputs: [{ name: "", type: "address" }],
+    outputs: [
+      { name: "asset", type: "address" },
+      { name: "isLong", type: "bool" },
+      { name: "notional", type: "uint256" },
+      { name: "leverage", type: "uint256" },
+      { name: "hasBorosHedge", type: "bool" },
+      { name: "yuToken", type: "address" },
+      { name: "lastUpdateTimestamp", type: "uint256" },
+      { name: "targetHedgeNotional", type: "uint256" },
+      { name: "currentHedgeNotional", type: "uint256" },
+      { name: "currentHedgeIsLong", type: "bool" },
+      { name: "targetHedgeIsLong", type: "bool" },
+    ],
+  },
 ] as const;
 const HL_MAINNET_URL = "https://api.hyperliquid.xyz/info";
 const HL_TESTNET_URL = "https://api.hyperliquid-testnet.xyz/info";
 
-const estimateBorosApr = (_requester: HTTPSendRequester, coin: string): number => {
-  const aprByCoin: Record<string, number> = {
-    ETH: 0.06,
-    BTC: 0.05,
-    SOL: 0.08,
-  };
+const resolveHlUrl = (config: Config, kind: "funding" | "position"): string => {
+  const specificBaseUrl = kind === "funding" ? config.hlFundingBaseUrl : config.hlPositionBaseUrl;
+  if (specificBaseUrl) return specificBaseUrl;
 
-  return aprByCoin[coin.toUpperCase()] ?? 0.05;
-};
+  const specificTestnet = kind === "funding" ? config.hlFundingTestnet : config.hlPositionTestnet;
+  if (typeof specificTestnet === "boolean") {
+    return specificTestnet ? HL_TESTNET_URL : HL_MAINNET_URL;
+  }
 
-const resolveHlUrl = (config: Config): string => {
   if (config.hlBaseUrl) return config.hlBaseUrl;
   return config.hlTestnet ? HL_TESTNET_URL : HL_MAINNET_URL;
+};
+
+const resolveUseMarkPrice = (config: Config): boolean => {
+  if (typeof config.hedgeNotionalUseMarkPrice === "boolean") {
+    return config.hedgeNotionalUseMarkPrice;
+  }
+  return String(process.env.DEMO_HEDGE_NOTIONAL_USE_MARK_PRICE ?? "").trim().toLowerCase() === "true";
+};
+
+const resolveHyperliquidWalletAddress = async (params: {
+  config: Config;
+  userId: bigint;
+  vaultAddress?: Address;
+  mappedUser: Address;
+}): Promise<{ address: Address; source: string }> => {
+  const bridged = await readWalletBridgeRecord({
+    userId: params.userId,
+    vaultAddress: params.vaultAddress,
+  });
+  if (bridged) {
+    return { address: bridged.walletAddress, source: "frontend_bridge" };
+  }
+
+  if (params.config.hlAddress && /^0x[0-9a-fA-F]{40}$/.test(params.config.hlAddress)) {
+    return { address: params.config.hlAddress as Address, source: "config" };
+  }
+
+  if (params.mappedUser !== ZERO_ADDRESS) {
+    return { address: params.mappedUser, source: "vault_mapping" };
+  }
+
+  throw new Error("Missing Hyperliquid wallet address in config, bridge registration, and vault mapping");
+};
+
+const resolveAgentUserId = async (config: Config, vaultAddress?: Address): Promise<bigint> => {
+  if (config.hlAddress && /^0x[0-9a-fA-F]{40}$/.test(config.hlAddress)) {
+    const bridgedUserId = await resolveWalletUserId({
+      walletAddress: config.hlAddress as Address,
+    });
+    if (bridgedUserId !== null) {
+      return bridgedUserId;
+    }
+  }
+
+  if (typeof config.userId === "number" && Number.isFinite(config.userId) && config.userId > 0) {
+    return BigInt(Math.floor(config.userId));
+  }
+
+  const latestBridgeRecord = await readWalletBridgeRecord({ vaultAddress });
+  if (latestBridgeRecord) {
+    return BigInt(latestBridgeRecord.userId);
+  }
+
+  const anyBridgeRecord = await readWalletBridgeRecord({});
+  if (anyBridgeRecord) {
+    return BigInt(anyBridgeRecord.userId);
+  }
+
+  return 123n;
 };
 
 const fetchPredictedFundingBp = (
@@ -481,6 +617,7 @@ const fetchHlPositionSnapshot = (
   requester: HTTPSendRequester,
   baseUrl: string,
   userAddress: string,
+  useMarkPrice: boolean,
 ): { positionSide: PositionSide; hlSize: number; markPrice: number; hedgeNotional: number } => {
   const payloadMeta = JSON.stringify({ type: "metaAndAssetCtxs" });
   const payloadState = JSON.stringify({ type: "clearinghouseState", user: userAddress });
@@ -524,73 +661,151 @@ const fetchHlPositionSnapshot = (
   const signedSize = Number(positionEntry?.position?.szi ?? 0);
   const positionSide: PositionSide = signedSize < 0 ? "short" : "long";
   const hlSize = Math.abs(signedSize);
-  const hedgeNotional = hlSize * markPrice;
+  const hedgeNotional = useMarkPrice ? hlSize * markPrice : hlSize;
 
   return { positionSide, hlSize, markPrice, hedgeNotional };
-};
-
-const computeShouldHedge = (params: {
-  averageFundingBp: number;
-  positionSide: PositionSide;
-  thresholdBp: number;
-  predictedAprBp: number;
-  borosAprBp: number;
-  confidenceBp: number;
-}): boolean => {
-  const unfavorableFundingBp =
-    params.positionSide === "long" ? params.averageFundingBp : -params.averageFundingBp;
-  const fundingUnfavorable = unfavorableFundingBp >= params.thresholdBp;
-  return (
-    fundingUnfavorable &&
-    params.predictedAprBp > params.borosAprBp + FEE_BUFFER_BP &&
-    params.confidenceBp >= MIN_CONFIDENCE_BP
-  );
 };
 
 const onCronTrigger = async (runtime: Runtime<Config>) => {
   const http = new HTTPClient();
   const config = runtime.config;
-  const thresholdBp = config.thresholdBp ?? THRESHOLD_BP;
+  const entryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
+  const exitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
   const windowHours = config.windowHours ?? WINDOW_HOURS;
-  const hlUrl = resolveHlUrl(config);
-
-  if (!config.hlAddress) {
-    throw new Error("Missing hlAddress in config for Hyperliquid position lookup");
-  }
-
-  const funding = http
-    .sendRequest(runtime, fetchAverageFundingBp, consensusIdenticalAggregation())(hlUrl, windowHours)
-    .result();
-
-  // DEMO OVERRIDE: force funding to be unfavorable so hedge opens.
-  funding.averageFundingBp = 500; // +5% APR equivalent
-  const oracleTimestamp = BigInt(Math.floor(funding.latestFundingTimestampMs / 1000));
-  const borosApr = http.sendRequest(runtime, estimateBorosApr, consensusIdenticalAggregation())(HL_COIN).result();
-  const position = http
-    .sendRequest(runtime, fetchHlPositionSnapshot, consensusIdenticalAggregation())(hlUrl, config.hlAddress)
-    .result();
-
-  const hlApr = funding.averageFundingBp / 10_000 / 100; // bp to decimal APR
-  runtime.log(`Boros APR: ${(borosApr * 100).toFixed(2)}%`);
-  runtime.log(`HL 1h avg funding (annualized): ${funding.averageFundingBp} bp`);
-  runtime.log(`HL position side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, mark=${position.markPrice.toFixed(4)}, hedgeNotional=${position.hedgeNotional.toFixed(4)}`);
-
-  // DEMO OVERRIDE: force APRs to drive hedge open
-  const predictedAprBp = 10_000; // 100% APR
-  const borosAprBp = 0;          // 0% comparator
-  const confidenceBp = 10_000;   // 100% confidence
-  const shouldHedge = computeShouldHedge({
-    averageFundingBp: funding.averageFundingBp,
-    positionSide: position.positionSide,
-    thresholdBp,
-    predictedAprBp,
-    borosAprBp,
-    confidenceBp,
-  });
-  const userId = BigInt(config.userId ?? 123);
+  const hedgeMode = config.hedgeMode ?? "adverse_only";
+  const borosOiFeeBp = config.borosOiFeeBp ?? DEFAULT_BOROS_OI_FEE_BP;
+  const useMarkPrice = resolveUseMarkPrice(config);
+  const hlFundingUrl = resolveHlUrl(config, "funding");
+  const hlPositionUrl = resolveHlUrl(config, "position");
   const yuToken = (config.yuToken ?? "0x0000000000000000000000000000000000000001") as `0x${string}`;
   const executeOnchain = config.executeOnchain ?? false;
   const enableReportWrite = config.enableReportWrite ?? false;
+  const rpcUrl = config.rpcUrl ?? DEFAULT_ANVIL_RPC_URL;
+  const vaultAddress = config.vaultAddress as `0x${string}`;
+
+  const publicClient = createPublicClient({
+    transport: viemHttp(rpcUrl, { timeout: 10_000 }),
+    chain: undefined,
+  });
+  const hasVaultAddress =
+    /^0x[0-9a-fA-F]{40}$/.test(vaultAddress) &&
+    vaultAddress !== "0x0000000000000000000000000000000000000000";
+  const userId = await resolveAgentUserId(config, hasVaultAddress ? vaultAddress : undefined);
+  let mappedUser = hasVaultAddress
+    ? ((await publicClient.readContract({
+        address: vaultAddress,
+        abi: KYUTE_VAULT_ABI,
+        functionName: "userIdToAddress",
+        args: [userId],
+      } as any)) as Address)
+    : ("0x0000000000000000000000000000000000000000" as Address);
+  const signerPk = config.callbackPrivateKey ?? DEFAULT_ANVIL_PRIVATE_KEY;
+  const canUseDirectSigner = executeOnchain && hasVaultAddress && /^0x[0-9a-fA-F]{64}$/.test(signerPk);
+  const directAccount = canUseDirectSigner ? privateKeyToAccount(signerPk as `0x${string}`) : null;
+  const directWalletClient = directAccount
+    ? createWalletClient({
+        account: directAccount,
+        transport: viemHttp(rpcUrl, { timeout: 10_000 }),
+        chain: undefined,
+      })
+    : null;
+  const hlWallet = await resolveHyperliquidWalletAddress({
+    config,
+    userId,
+    vaultAddress: hasVaultAddress ? vaultAddress : undefined,
+    mappedUser,
+  });
+  if (
+    hasVaultAddress &&
+    directAccount &&
+    directWalletClient &&
+    hlWallet.address.toLowerCase() !== mappedUser.toLowerCase()
+  ) {
+    const registeredOperator = (await publicClient.readContract({
+      address: vaultAddress,
+      abi: KYUTE_VAULT_ABI,
+      functionName: "creCallbackOperator",
+    } as any)) as Address;
+
+    if (registeredOperator.toLowerCase() !== directAccount.address.toLowerCase()) {
+      runtime.log(
+        `Skipping syncUserAddress because callback signer ${directAccount.address} does not match vault creCallbackOperator ${registeredOperator}`,
+      );
+    } else {
+      const syncUserData = encodeFunctionData({
+        abi: KYUTE_VAULT_ABI,
+        functionName: "syncUserAddress",
+        args: [userId, hlWallet.address],
+      });
+      const syncUserTxHash = await directWalletClient.sendTransaction({
+        account: directAccount,
+        chain: undefined,
+        to: vaultAddress,
+        data: syncUserData,
+      } as any);
+      const syncUserReceipt = await publicClient.waitForTransactionReceipt({ hash: syncUserTxHash });
+      if (syncUserReceipt.status !== "success") {
+        throw new Error(`syncUserAddress failed tx=${syncUserTxHash}`);
+      }
+      runtime.log(`Direct syncUserAddress tx confirmed: ${syncUserTxHash}`);
+      mappedUser = hlWallet.address;
+    }
+  }
+  const hasMappedUser = mappedUser !== "0x0000000000000000000000000000000000000000";
+  if (hlFundingUrl !== hlPositionUrl) {
+    runtime.log(`Using separate HL endpoints fundingUrl=${hlFundingUrl} positionUrl=${hlPositionUrl}`);
+  }
+  const [funding, borosQuote, position] = await Promise.all([
+    http
+      .sendRequest(runtime, fetchAverageFundingBp, consensusIdenticalAggregation())(hlFundingUrl, windowHours)
+      .result(),
+    fetchBorosImpliedAprQuote(HL_COIN, {
+      marketAddress: config.borosMarketAddress,
+      coreApiUrl: config.borosCoreApiUrl,
+    }),
+    http
+      .sendRequest(runtime, fetchHlPositionSnapshot, consensusIdenticalAggregation())(hlPositionUrl, hlWallet.address, useMarkPrice)
+      .result(),
+  ]);
+  const oracleTimestamp = BigInt(Math.floor(funding.latestFundingTimestampMs / 1000));
+  const borosAprBp = borosQuote.aprBp;
+  const borosApr = borosQuote.aprDecimal;
+  const positionState = hasMappedUser
+    ? ((await publicClient.readContract({
+        address: vaultAddress,
+        abi: KYUTE_VAULT_ABI,
+        functionName: "userPositions",
+        args: [mappedUser],
+      } as any)) as readonly [Address, boolean, bigint, bigint, boolean, Address, bigint, bigint, bigint, boolean, boolean])
+    : null;
+
+  const confidenceBp = 10_000;
+  const livePositionNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
+  const decision = computeHedgePolicy({
+    positionSide: position.positionSide,
+    averageFundingBp: funding.averageFundingBp,
+    borosImpliedAprBp: borosAprBp,
+    confidenceBp,
+    hasExistingHedge: Boolean(positionState?.[4]),
+    existingHedgeIsLong: Boolean(positionState?.[9]),
+    entryThresholdBp,
+    exitThresholdBp,
+    minConfidenceBp: MIN_CONFIDENCE_BP,
+    oiFeeBp: borosOiFeeBp,
+    mode: hedgeMode,
+  });
+  const predictedAprBp = Math.round(decision.carrySourceAprBp);
+  const contractBorosAprBp = Math.round(decision.carryCostAprBp);
+  const shouldHedge = decision.shouldHedge && livePositionNotionalWei > 0n;
+  const targetHedgeIsLong = decision.targetHedgeIsLong;
+  const targetHedgeNotionalWei = shouldHedge ? livePositionNotionalWei : 0n;
+
+  runtime.log(`Boros APR: ${(borosApr * 100).toFixed(2)}% market=${borosQuote.marketAddress ?? "auto"}`);
+  runtime.log(`HL 1h avg funding (annualized): ${funding.averageFundingBp} bp`);
+  runtime.log(
+    `HL wallet=${hlWallet.address} source=${hlWallet.source} side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, mark=${position.markPrice.toFixed(4)}, ` +
+    `hedgeNotional=${position.hedgeNotional.toFixed(6)} useMark=${useMarkPrice} exposure=${decision.exposure} edge=${decision.edgeBp}bp targetHedgeIsLong=${targetHedgeIsLong}`,
+  );
 
   const proofPayload = JSON.stringify({
     type: "kYUteMvpNodeModeProof",
@@ -599,11 +814,11 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
     chainId: 0,
     userId: userId.toString(),
     pair: PAIR,
-    vaultAddress: config.vaultAddress,
+    vaultAddress,
     yuToken,
     inputs: {
       windowHours,
-      thresholdBp,
+      thresholdBp: entryThresholdBp,
       averageFundingBp: funding.averageFundingBp,
       positionSide: position.positionSide,
       hlSize: position.hlSize,
@@ -616,6 +831,9 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       predictedAprBp,
       confidenceBp,
       shouldHedge,
+      targetHedgeIsLong,
+      exposure: decision.exposure,
+      edgeBp: decision.edgeBp,
     },
   });
   const proofHash = keccak256(toBytes(proofPayload));
@@ -639,28 +857,72 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       yuToken,
       BigInt(predictedAprBp),
       BigInt(confidenceBp),
-      BigInt(borosAprBp),
-      position.positionSide === "long" ? 1 : 2,
-      BigInt(Math.round(position.hedgeNotional)),
+      BigInt(contractBorosAprBp),
+      targetHedgeIsLong ? 1 : 2,
+      livePositionNotionalWei,
       oracleTimestamp,
       proofHash
     ],
   )
 
   if (executeOnchain) {
-    const signerPk = config.callbackPrivateKey ?? DEFAULT_ANVIL_PRIVATE_KEY;
-    const rpcUrl = config.rpcUrl ?? DEFAULT_ANVIL_RPC_URL;
     let directExecuteSucceeded = false;
 
-    if (/^0x[0-9a-fA-F]{64}$/.test(signerPk) && config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
+    if (directAccount && directWalletClient && hasVaultAddress) {
       try {
-        runtime.log(`Submitting direct executeHedge to vault=${config.vaultAddress} via rpc=${rpcUrl}`);
-        const account = privateKeyToAccount(signerPk as `0x${string}`);
-        const walletClient = createWalletClient({
-          account,
-          transport: viemHttp(rpcUrl, { timeout: 10_000 }),
-          chain: undefined,
-        });
+        runtime.log(`Submitting direct executeHedge to vault=${vaultAddress} via rpc=${rpcUrl}`);
+        const registeredOperator = (await publicClient.readContract({
+          address: vaultAddress,
+          abi: KYUTE_VAULT_ABI,
+          functionName: "creCallbackOperator",
+        } as any)) as Address;
+        if (registeredOperator.toLowerCase() !== directAccount.address.toLowerCase()) {
+          throw new Error(
+            `Callback signer ${directAccount.address} does not match vault creCallbackOperator ${registeredOperator}`,
+          );
+        }
+        if (!hasMappedUser || positionState == null) {
+          throw new Error(`userId=${userId} is not mapped in vault ${vaultAddress}`);
+        }
+
+        const leverageForSync = positionState[3] > 0n ? positionState[3] : 1n;
+        const syncNeeded =
+          (positionState[0] === "0x0000000000000000000000000000000000000000" && livePositionNotionalWei > 0n) ||
+          (
+            positionState[0] !== "0x0000000000000000000000000000000000000000" &&
+            (
+              Boolean(positionState[1]) !== (position.positionSide === "long") ||
+              positionState[2] !== livePositionNotionalWei ||
+              positionState[7] !== targetHedgeNotionalWei ||
+              Boolean(positionState[10]) !== targetHedgeIsLong
+            )
+          );
+        if (syncNeeded) {
+          const syncData = encodeFunctionData({
+            abi: KYUTE_VAULT_ABI,
+            functionName: "syncHyperliquidPosition",
+            args: [
+              userId,
+              position.positionSide === "long",
+              livePositionNotionalWei,
+              leverageForSync,
+              targetHedgeNotionalWei,
+              targetHedgeIsLong,
+              oracleTimestamp,
+            ],
+          });
+          const syncTxHash = await directWalletClient.sendTransaction({
+            account: directAccount,
+            chain: undefined,
+            to: vaultAddress,
+            data: syncData,
+          } as any);
+          const syncReceipt = await publicClient.waitForTransactionReceipt({ hash: syncTxHash });
+          if (syncReceipt.status !== "success") {
+            throw new Error(`syncHyperliquidPosition failed tx=${syncTxHash}`);
+          }
+          runtime.log(`Direct syncHyperliquidPosition tx confirmed: ${syncTxHash}`);
+        }
 
         const data = encodeFunctionData({
           abi: KYUTE_VAULT_ABI,
@@ -671,19 +933,19 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
             yuToken,
             BigInt(predictedAprBp),
             BigInt(confidenceBp),
-            BigInt(borosAprBp),
-            BigInt(Math.round(position.hedgeNotional)),
+            BigInt(contractBorosAprBp),
+            targetHedgeNotionalWei,
             oracleTimestamp,
             proofHash,
           ],
         });
 
-        const txHash = await walletClient.sendTransaction({
-          account,
+        const txHash = await directWalletClient.sendTransaction({
+          account: directAccount,
           chain: undefined,
-          to: config.vaultAddress as `0x${string}`,
+          to: vaultAddress,
           data,
-        });
+        } as any);
         runtime.log(`Direct executeHedge tx submitted: ${txHash}`);
         directExecuteSucceeded = true;
       } catch (error) {
@@ -709,9 +971,9 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       }).result();
 
       const evmClient = new EVMClient(4949039107694359620n);
-      const receiver = new Uint8Array(Buffer.from(config.vaultAddress.slice(2), "hex"));
+      const receiver = new Uint8Array(Buffer.from(vaultAddress.slice(2), "hex"));
 
-      if (config.vaultAddress !== "0x0000000000000000000000000000000000000000") {
+      if (hasVaultAddress) {
         evmClient.writeReport(runtime, {
           $report: true,
           receiver,

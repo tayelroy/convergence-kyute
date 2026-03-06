@@ -15,16 +15,29 @@ contract MockERC20 is ERC20 {
 }
 
 contract MockBorosRouter is IBorosRouter {
+    uint256 public openCount;
+    uint256 public closeCount;
+    uint256 public lastAmount;
+    bool public lastIsLong;
+    address public lastUser;
+    address public lastToken;
+
     function openPosition(
         address user,
         address token,
         uint256 amount,
         bool isLong
     ) external override {
-        // Mock successful open
+        openCount += 1;
+        lastUser = user;
+        lastToken = token;
+        lastAmount = amount;
+        lastIsLong = isLong;
     }
     function closePosition(address user, address token) external override {
-        // Mock successful close
+        closeCount += 1;
+        lastUser = user;
+        lastToken = token;
     }
 }
 
@@ -77,7 +90,9 @@ contract kYUteVaultTest is Test {
     address public owner = address(0x1);
     address public creOperator = address(0x2);
     address public user = address(0x3);
+    address public canonicalUser = address(0x33);
     address public attacker = address(0x4);
+    address public liquidityProvider = address(0x5);
 
     function setUp() public {
         vm.startPrank(owner);
@@ -87,6 +102,7 @@ contract kYUteVaultTest is Test {
         vm.stopPrank();
 
         asset.mint(user, 1000 ether);
+        asset.mint(liquidityProvider, 2000 ether);
 
         vm.startPrank(user);
         asset.approve(address(vault), type(uint256).max);
@@ -112,12 +128,20 @@ contract kYUteVaultTest is Test {
             uint256 leverage,
             bool hasBorosHedge,
             address yuToken,
-            uint256 lastUpdate
+            uint256 lastUpdate,
+            uint256 targetHedgeNotional,
+            uint256 currentHedgeNotional,
+            bool currentHedgeIsLong,
+            bool targetHedgeIsLong
         ) = vault.userPositions(user);
         assertEq(posAsset, address(asset));
         assertEq(isLong, true);
         assertEq(notional, 10 ether);
         assertEq(hasBorosHedge, false);
+        assertEq(targetHedgeNotional, 10 ether);
+        assertEq(currentHedgeNotional, 0);
+        assertEq(currentHedgeIsLong, false);
+        assertEq(targetHedgeIsLong, true);
     }
 
     function test_OpenHyperliquidPosition_Revert_UserIdAlreadyMappedByAnotherUser() public {
@@ -171,11 +195,18 @@ contract kYUteVaultTest is Test {
             uint256 leverage,
             bool hasBorosHedge,
             address yuToken,
-            uint256 lastUpdate
+            uint256 lastUpdate,
+            uint256 targetHedgeNotional,
+            uint256 currentHedgeNotional,
+            bool currentHedgeIsLong,
+            bool targetHedgeIsLong
         ) = vault.userPositions(user);
         assertEq(isLong, false);
         assertEq(notional, 12 ether);
         assertEq(leverage, 3);
+        assertEq(targetHedgeNotional, 12 ether);
+        assertEq(currentHedgeNotional, 0);
+        assertEq(targetHedgeIsLong, true);
         assertEq(vault.userIdToAddress(123), user);
     }
 
@@ -199,11 +230,263 @@ contract kYUteVaultTest is Test {
             mockProof // proofHash
         );
 
-        (, , , , bool hasBorosHedge, address yuToken, ) = vault.userPositions(
+        (, , , , bool hasBorosHedge, address yuToken, , uint256 targetHedgeNotional, uint256 currentHedgeNotional, bool currentHedgeIsLong, bool targetHedgeIsLong) = vault.userPositions(
             user
         );
         assertEq(hasBorosHedge, true);
         assertEq(yuToken, address(0x99));
+        assertEq(targetHedgeNotional, 10 ether);
+        assertEq(currentHedgeNotional, 10 ether);
+        assertEq(currentHedgeIsLong, true);
+        assertEq(targetHedgeIsLong, true);
+        assertEq(router.openCount(), 1);
+        assertEq(router.closeCount(), 0);
+    }
+
+    function test_ExecuteHedge_Revert_UserCollateralCapBreach() public {
+        vm.startPrank(liquidityProvider);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1000 ether, liquidityProvider);
+        vm.stopPrank();
+
+        vm.prank(user);
+        vault.openHyperliquidPosition(
+            "",
+            123,
+            address(asset),
+            true,
+            25 ether,
+            5
+        );
+
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(creOperator);
+        vm.expectRevert(kYUteVault.UserCollateralCapBreach.selector);
+        vault.executeHedge(
+            123,
+            true,
+            address(0x99),
+            1500,
+            6500,
+            1000,
+            25 ether,
+            block.timestamp,
+            keccak256("proof-user-cap")
+        );
+    }
+
+    function test_SyncHyperliquidPosition_UpdatesTargetAndExecuteHedgeIsIdempotent() public {
+        test_ExecuteHedge_Success();
+
+        vm.warp(block.timestamp + 1 minutes);
+        vm.prank(creOperator);
+        vault.syncHyperliquidPosition(
+            123,
+            true,
+            10 ether,
+            5,
+            10 ether,
+            true,
+            block.timestamp
+        );
+
+        vm.warp(block.timestamp + 1 minutes);
+        vm.prank(creOperator);
+        vault.executeHedge(
+            123,
+            true,
+            address(0x99),
+            1500,
+            6500,
+            1000,
+            10 ether,
+            block.timestamp,
+            keccak256("proof-repeat")
+        );
+
+        (, , , , bool hasBorosHedge, address yuToken, , , uint256 currentHedgeNotional, bool currentHedgeIsLong, bool targetHedgeIsLong) = vault.userPositions(user);
+        assertEq(hasBorosHedge, true);
+        assertEq(yuToken, address(0x99));
+        assertEq(currentHedgeNotional, 10 ether);
+        assertEq(currentHedgeIsLong, true);
+        assertEq(targetHedgeIsLong, true);
+        assertEq(router.openCount(), 1);
+        assertEq(router.closeCount(), 0);
+    }
+
+    function test_SyncUserAddress_RemapsUserAndMovesPositionState() public {
+        vm.prank(user);
+        vault.openHyperliquidPosition(
+            "",
+            123,
+            address(asset),
+            true,
+            10 ether,
+            5
+        );
+
+        vm.prank(creOperator);
+        vault.syncUserAddress(123, canonicalUser);
+
+        assertEq(vault.userIdToAddress(123), canonicalUser);
+
+        (
+            address posAsset,
+            bool isLong,
+            uint256 notional,
+            uint256 leverage,
+            bool hasBorosHedge,
+            address yuToken,
+            uint256 lastUpdate,
+            uint256 targetHedgeNotional,
+            uint256 currentHedgeNotional,
+            bool currentHedgeIsLong,
+            bool targetHedgeIsLong
+        ) = vault.userPositions(canonicalUser);
+        assertEq(posAsset, address(asset));
+        assertEq(isLong, true);
+        assertEq(notional, 10 ether);
+        assertEq(leverage, 5);
+        assertEq(hasBorosHedge, false);
+        assertEq(yuToken, address(0));
+        assertGt(lastUpdate, 0);
+        assertEq(targetHedgeNotional, 10 ether);
+        assertEq(currentHedgeNotional, 0);
+        assertEq(currentHedgeIsLong, false);
+        assertEq(targetHedgeIsLong, true);
+
+        (address oldAsset,,,,,,,,,,) = vault.userPositions(user);
+        assertEq(oldAsset, address(0));
+    }
+
+    function test_SyncHyperliquidPosition_BootstrapsPositionForMappedUser() public {
+        asset.mint(canonicalUser, 100 ether);
+        vm.startPrank(canonicalUser);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(25 ether, canonicalUser);
+        vm.stopPrank();
+
+        vm.prank(creOperator);
+        vault.syncUserAddress(123, canonicalUser);
+
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(creOperator);
+        vault.syncHyperliquidPosition(
+            123,
+            true,
+            6 ether,
+            1,
+            6 ether,
+            true,
+            block.timestamp
+        );
+
+        (
+            address posAsset,
+            bool isLong,
+            uint256 notional,
+            uint256 leverage,
+            bool hasBorosHedge,
+            address yuToken,
+            uint256 lastUpdate,
+            uint256 targetHedgeNotional,
+            uint256 currentHedgeNotional,
+            bool currentHedgeIsLong,
+            bool targetHedgeIsLong
+        ) = vault.userPositions(canonicalUser);
+        assertEq(posAsset, address(asset));
+        assertEq(isLong, true);
+        assertEq(notional, 6 ether);
+        assertEq(leverage, 1);
+        assertEq(hasBorosHedge, false);
+        assertEq(yuToken, address(0));
+        assertEq(lastUpdate, block.timestamp);
+        assertEq(targetHedgeNotional, 6 ether);
+        assertEq(currentHedgeNotional, 0);
+        assertEq(currentHedgeIsLong, false);
+        assertEq(targetHedgeIsLong, true);
+    }
+
+    function test_SyncHyperliquidPosition_RebalancesExistingHedge() public {
+        test_ExecuteHedge_Success();
+
+        vm.warp(block.timestamp + 1 minutes);
+        vm.prank(creOperator);
+        vault.syncHyperliquidPosition(
+            123,
+            true,
+            9 ether,
+            5,
+            9 ether,
+            true,
+            block.timestamp
+        );
+
+        vm.warp(block.timestamp + 1 minutes);
+        vm.prank(creOperator);
+        vault.executeHedge(
+            123,
+            true,
+            address(0x99),
+            1500,
+            6500,
+            1000,
+            9 ether,
+            block.timestamp,
+            keccak256("proof-rebalance")
+        );
+
+        (, , uint256 notional, , bool hasBorosHedge, address yuToken, , uint256 targetHedgeNotional, uint256 currentHedgeNotional, bool currentHedgeIsLong, bool targetHedgeIsLong) = vault.userPositions(user);
+        assertEq(notional, 9 ether);
+        assertEq(targetHedgeNotional, 9 ether);
+        assertEq(hasBorosHedge, true);
+        assertEq(yuToken, address(0x99));
+        assertEq(currentHedgeNotional, 9 ether);
+        assertEq(currentHedgeIsLong, true);
+        assertEq(targetHedgeIsLong, true);
+        assertEq(router.openCount(), 2);
+        assertEq(router.closeCount(), 1);
+        assertEq(router.lastAmount(), 9 ether);
+    }
+
+    function test_SyncHyperliquidPosition_CanTargetShortYu() public {
+        test_OpenHyperliquidPosition();
+
+        vm.warp(block.timestamp + 1 minutes);
+        vm.prank(creOperator);
+        vault.syncHyperliquidPosition(
+            123,
+            false,
+            10 ether,
+            5,
+            10 ether,
+            false,
+            block.timestamp
+        );
+
+        vm.warp(block.timestamp + 1 minutes);
+        vm.prank(creOperator);
+        vault.executeHedge(
+            123,
+            true,
+            address(0x99),
+            1500,
+            6500,
+            1000,
+            10 ether,
+            block.timestamp,
+            keccak256("proof-short-target")
+        );
+
+        (, bool isLong, , , bool hasBorosHedge, address yuToken, , uint256 targetHedgeNotional, uint256 currentHedgeNotional, bool currentHedgeIsLong, bool targetHedgeIsLong) = vault.userPositions(user);
+        assertEq(isLong, false);
+        assertEq(hasBorosHedge, true);
+        assertEq(yuToken, address(0x99));
+        assertEq(targetHedgeNotional, 10 ether);
+        assertEq(currentHedgeNotional, 10 ether);
+        assertEq(currentHedgeIsLong, false);
+        assertEq(targetHedgeIsLong, false);
+        assertEq(router.lastIsLong(), false);
     }
 
     function test_ExecuteHedge_Revert_InsufficientConfidence() public {

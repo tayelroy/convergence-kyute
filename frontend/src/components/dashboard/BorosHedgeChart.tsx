@@ -5,16 +5,16 @@ import { cn } from "@/lib/utils";
 
 type HedgePoint = {
   timestamp: number;
-  amountEth: number;
+  amountYu: number;
 };
 
 interface BorosHedgeChartProps {
   points: HedgePoint[];
-  currentAmountEth?: number | null;
+  currentAmountYu?: number | null;
   hedgeSide?: string | null;
   lastUpdatedAt?: string | null;
   loading?: boolean;
-  isDemo?: boolean;
+  modeLabel?: string | null;
   className?: string;
 }
 
@@ -28,30 +28,31 @@ const formatTs = (ts: number) =>
 
 export function BorosHedgeChart({
   points,
-  currentAmountEth = null,
+  currentAmountYu = null,
   hedgeSide = null,
   lastUpdatedAt = null,
   loading = false,
-  isDemo = false,
+  modeLabel = null,
   className,
 }: BorosHedgeChartProps) {
-  const sizeLabel = loading ? "..." : `${Number(currentAmountEth ?? 0).toFixed(4)} ETH`;
+  const hasHedge = Number(currentAmountYu ?? 0) > 0.0000001;
+  const sizeLabel = loading ? "..." : hasHedge ? `${Number(currentAmountYu ?? 0).toFixed(4)} YU` : "No hedge";
   const updatedLabel = lastUpdatedAt ?? "--";
 
   return (
     <div className={cn("w-full min-w-0 h-full border border-[#1a1a1a] bg-[linear-gradient(180deg,#0a0a0a,#080808)] rounded-sm p-4 flex flex-col", className)}>
       <div className="flex items-center justify-between mb-3 shrink-0">
         <div>
-          <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">BOROS HEDGE (ETH)</h3>
-          <p className="text-sm font-semibold text-white mt-1">Vault Position (ETH)</p>
+          <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">BOROS HEDGE (YU)</h3>
+          <p className="text-sm font-semibold text-white mt-1">Vault Position (YU)</p>
         </div>
         <div className="text-right">
           <p className="text-xs font-mono text-white">
             Current: {sizeLabel}
-            {hedgeSide ? ` (${hedgeSide})` : ""}
+            {hasHedge && hedgeSide ? ` (${hedgeSide})` : ""}
           </p>
           <p className="text-[10px] font-mono text-[#666] mt-1">Last hedge: {updatedLabel}</p>
-          {isDemo && <p className="text-[10px] font-mono text-[#555] mt-1">Demo data</p>}
+          {modeLabel && <p className="text-[10px] font-mono text-[#555] mt-1">{modeLabel}</p>}
         </div>
       </div>
 
@@ -83,11 +84,11 @@ export function BorosHedgeChart({
               <Tooltip
                 contentStyle={{ background: "#090909", border: "1px solid #2a2a2a", color: "#fff" }}
                 labelFormatter={(value) => formatTs(Number(value))}
-                formatter={(value) => [`${Number(value).toFixed(4)} ETH`, "Hedge size"]}
+                formatter={(value) => [`${Number(value).toFixed(4)} YU`, "Hedge size"]}
               />
               <Area
                 type="monotone"
-                dataKey="amountEth"
+                dataKey="amountYu"
                 stroke="#5ad8a6"
                 strokeWidth={2}
                 fill="url(#borosHedgeGradient)"

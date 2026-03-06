@@ -72,7 +72,7 @@ export function GuardianControls({
                 </div>
                 <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
                     <span>Latest Hedge</span>
-                    <span className="text-white">{latestHedge ? `${Number(latestHedge.amount_eth ?? 0).toFixed(4)} ETH` : "N/A"}</span>
+                    <span className="text-white">{latestHedge ? `${Number(latestHedge.amount_eth ?? 0).toFixed(4)} YU` : "N/A"}</span>
                 </div>
                 <div className="flex justify-between text-[10px] font-mono text-[#888] mt-1">
                     <span>Automation Tx</span>
