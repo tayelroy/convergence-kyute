@@ -116,6 +116,20 @@ export const computeHedgePolicy = (
     label: "long_yu_pay_fixed_receive_floating",
   });
 
+  const shortLockCandidate = evaluateCandidate({
+    floatingAprBp: exposure.floatingAprBp,
+    carrySourceAprBp: effectiveFixedReceiveAprBp,
+    // In lock_fixed mode the perp's receive-floating leg offsets the Boros pay-floating leg.
+    // The relevant decision is whether the remaining fixed receive is attractive enough to lock.
+    carryCostAprBp: 0,
+    entryThresholdBp: input.entryThresholdBp,
+    exitThresholdBp: input.exitThresholdBp,
+    confidenceOk,
+    hasExistingMatchingHedge: input.hasExistingHedge && !input.existingHedgeIsLong,
+    targetHedgeIsLong: false,
+    label: "short_yu_lock_fixed_receive_fixed",
+  });
+
   if (exposure.exposure === "pay_floating") {
     return {
       exposure: exposure.exposure,
@@ -134,30 +148,36 @@ export const computeHedgePolicy = (
   }
 
   if (exposure.exposure === "receive_floating" && mode === "lock_fixed") {
-    const shortCandidate = evaluateCandidate({
-      floatingAprBp: exposure.floatingAprBp,
-      carrySourceAprBp: effectiveFixedReceiveAprBp,
-      carryCostAprBp: exposure.floatingAprBp,
-      entryThresholdBp: input.entryThresholdBp,
-      exitThresholdBp: input.exitThresholdBp,
-      confidenceOk,
-      hasExistingMatchingHedge: input.hasExistingHedge && !input.existingHedgeIsLong,
-      targetHedgeIsLong: false,
-      label: "short_yu_receive_fixed_pay_floating",
-    });
     return {
       exposure: exposure.exposure,
-      shouldHedge: shortCandidate.shouldHedge,
+      shouldHedge: shortLockCandidate.shouldHedge,
       targetHedgeIsLong: false,
       floatingAprBp: exposure.floatingAprBp,
       borosImpliedAprBp: input.borosImpliedAprBp,
       effectiveFixedPayAprBp,
       effectiveFixedReceiveAprBp,
-      carrySourceAprBp: shortCandidate.carrySourceAprBp,
-      carryCostAprBp: shortCandidate.carryCostAprBp,
-      edgeBp: shortCandidate.edgeBp,
+      carrySourceAprBp: shortLockCandidate.carrySourceAprBp,
+      carryCostAprBp: shortLockCandidate.carryCostAprBp,
+      edgeBp: shortLockCandidate.edgeBp,
       confidenceOk,
-      reason: shortCandidate.reason,
+      reason: shortLockCandidate.reason,
+    };
+  }
+
+  if (exposure.exposure === "receive_floating") {
+    return {
+      exposure: exposure.exposure,
+      shouldHedge: false,
+      targetHedgeIsLong: input.hasExistingHedge ? input.existingHedgeIsLong : false,
+      floatingAprBp: exposure.floatingAprBp,
+      borosImpliedAprBp: input.borosImpliedAprBp,
+      effectiveFixedPayAprBp,
+      effectiveFixedReceiveAprBp,
+      carrySourceAprBp: shortLockCandidate.carrySourceAprBp,
+      carryCostAprBp: shortLockCandidate.carryCostAprBp,
+      edgeBp: shortLockCandidate.edgeBp,
+      confidenceOk,
+      reason: "receive_floating exposure left unhedged in adverse_only mode",
     };
   }
 
@@ -169,19 +189,10 @@ export const computeHedgePolicy = (
     borosImpliedAprBp: input.borosImpliedAprBp,
     effectiveFixedPayAprBp,
     effectiveFixedReceiveAprBp,
-    carrySourceAprBp: exposure.floatingAprBp,
-    carryCostAprBp:
-      exposure.exposure === "receive_floating"
-        ? effectiveFixedReceiveAprBp
-        : effectiveFixedPayAprBp,
-    edgeBp:
-      exposure.exposure === "receive_floating"
-        ? effectiveFixedReceiveAprBp - exposure.floatingAprBp
-        : exposure.floatingAprBp - effectiveFixedPayAprBp,
+    carrySourceAprBp: 0,
+    carryCostAprBp: effectiveFixedPayAprBp,
+    edgeBp: -effectiveFixedPayAprBp,
     confidenceOk,
-    reason:
-      exposure.exposure === "receive_floating"
-        ? "receive_floating exposure left unhedged in adverse_only mode"
-        : "flat funding exposure",
+    reason: "flat funding exposure",
   };
 };
