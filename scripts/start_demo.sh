@@ -67,7 +67,9 @@ if [ -z "${PRIVATE_KEY:-}" ] && [ -n "${ANVIL_PRIVATE_KEY:-}" ]; then
     export PRIVATE_KEY="${ANVIL_PRIVATE_KEY}"
 fi
 
-if [ -z "${CRE_SIM_PRIVATE_KEY:-}" ] && [ -n "${PRIVATE_KEY:-}" ]; then
+if [ -z "${CRE_SIM_PRIVATE_KEY:-}" ] && [ -n "${ANVIL_PRIVATE_KEY:-}" ]; then
+    export CRE_SIM_PRIVATE_KEY="${ANVIL_PRIVATE_KEY}"
+elif [ -z "${CRE_SIM_PRIVATE_KEY:-}" ] && [ -n "${PRIVATE_KEY:-}" ]; then
     export CRE_SIM_PRIVATE_KEY="${PRIVATE_KEY}"
 fi
 
@@ -104,7 +106,7 @@ DEMO_RPC_URL="${DEMO_RPC_URL:-http://localhost:8545}"
 FORK_BLOCK_NUMBER="${FORK_BLOCK_NUMBER:-}"
 DEMO_NO_FORK="${DEMO_NO_FORK:-true}"
 DEMO_USER_ID="${DEMO_USER_ID:-${DEMO_USER_ID_DEFAULT}}"
-DEMO_EXEC_MODE="${DEMO_EXEC_MODE:-direct}"
+DEMO_EXEC_MODE="${DEMO_EXEC_MODE:-cre}"
 DEMO_POSITION_NOTIONAL_WEI="${DEMO_POSITION_NOTIONAL_WEI:-${DEMO_POSITION_NOTIONAL_WEI_DEFAULT}}"
 DEMO_HL_POSITION_TESTNET="${DEMO_HL_POSITION_TESTNET:-true}"
 export ANVIL_RPC_URL="${DEMO_RPC_URL}"
@@ -178,7 +180,9 @@ upsert_env_var() {
 sync_frontend_demo_env() {
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_DEMO_MODE" "true"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "ANVIL_RPC_URL" "${DEMO_RPC_URL}"
+    upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_KYUTE_RPC_URL" "${DEMO_RPC_URL}"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "BOROS_ROUTER_ADDRESS" "${BOROS_ROUTER_ADDRESS}"
+    upsert_env_var "${FRONTEND_ENV_LOCAL}" "BOROS_COLLATERAL_ADDRESS" "${BOROS_COLLATERAL_ADDRESS}"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "BOROS_YU_TOKEN" "${DEFAULT_YU_TOKEN}"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_KYUTE_CHAIN_ID" "31337"
     echo "   ✓ Synced frontend demo env at ${FRONTEND_ENV_LOCAL}"
