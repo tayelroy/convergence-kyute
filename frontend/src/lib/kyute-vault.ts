@@ -40,6 +40,25 @@ export const VAULT_ABI = [
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
   },
+  {
+    type: "function",
+    name: "userPositions",
+    stateMutability: "view",
+    inputs: [{ name: "user", type: "address" }],
+    outputs: [
+      { name: "asset", type: "address" },
+      { name: "isLong", type: "bool" },
+      { name: "notional", type: "uint256" },
+      { name: "leverage", type: "uint256" },
+      { name: "hasBorosHedge", type: "bool" },
+      { name: "yuToken", type: "address" },
+      { name: "lastUpdateTimestamp", type: "uint256" },
+      { name: "targetHedgeNotional", type: "uint256" },
+      { name: "currentHedgeNotional", type: "uint256" },
+      { name: "currentHedgeIsLong", type: "bool" },
+      { name: "targetHedgeIsLong", type: "bool" },
+    ],
+  },
 ] as const;
 
 export const ERC20_ABI = [
