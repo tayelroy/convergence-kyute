@@ -15,6 +15,7 @@ import {
   type HedgeMode,
   type PositionSide,
 } from "../hedge-policy.js";
+import { resolveUserHedgeMode } from "../strategy-config.js";
 
 const PAIR = "ETHUSDC";
 const HL_COIN = "ETH";
@@ -390,7 +391,7 @@ export const runKyuteWorkflowCycle = async (
   const exitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
   const windowHours = config.windowHours ?? WINDOW_HOURS;
   const baseUrl = config.hlBaseUrl ?? (config.hlTestnet ? HL_TESTNET_URL : HL_MAINNET_URL);
-  const hedgeMode = config.hedgeMode ?? "adverse_only";
+  const configuredHedgeMode = config.hedgeMode ?? "adverse_only";
   const borosOiFeeBp = config.borosOiFeeBp ?? DEFAULT_BOROS_OI_FEE_BP;
 
   const funding = await fetchHyperliquidFundingHistoryApr(HL_COIN, baseUrl, windowHours);
@@ -416,6 +417,18 @@ export const runKyuteWorkflowCycle = async (
         args: [mappedUser],
       } as any)) as readonly [Address, boolean, bigint, bigint, boolean, Address, bigint, bigint, bigint, boolean, boolean])
     : null;
+  const strategyMode = await resolveUserHedgeMode({
+    userId: config.userId,
+    walletAddress: config.hlAddress,
+    vaultAddress: config.vaultAddress,
+    fallbackMode: configuredHedgeMode,
+    logger: (message) => log(`[workflow-runner] ${message}`),
+  });
+  const hedgeMode = strategyMode.mode;
+  log(`[workflow-runner] using strategy mode ${hedgeMode} from ${strategyMode.source}`);
+  if (strategyMode.warning) {
+    log(`[workflow-runner] strategy mode warning: ${strategyMode.warning}`);
+  }
 
   const decision = computeHedgePolicy({
     positionSide: position.positionSide,
@@ -486,14 +499,19 @@ export const runKyuteWorkflowCycle = async (
       throw new Error(`userId=${config.userId} is not mapped in vault ${config.vaultAddress}`);
     }
 
-    const targetHedgeNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
+    const livePositionNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
+    const syncTargetHedgeNotionalWei = shouldHedge ? livePositionNotionalWei : 0n;
+    const leverageForSync = positionState[3] > 0n ? positionState[3] : 1n;
     const syncNeeded =
-      Boolean(positionState[0] !== "0x0000000000000000000000000000000000000000") &&
+      (positionState[0] === "0x0000000000000000000000000000000000000000" && livePositionNotionalWei > 0n) ||
       (
-        Boolean(positionState[1]) !== (position.positionSide === "long") ||
-        positionState[2] !== targetHedgeNotionalWei ||
-        positionState[7] !== (shouldHedge ? targetHedgeNotionalWei : 0n) ||
-        Boolean(positionState[10]) !== targetHedgeIsLong
+        positionState[0] !== "0x0000000000000000000000000000000000000000" &&
+        (
+          Boolean(positionState[1]) !== (position.positionSide === "long") ||
+          positionState[2] !== livePositionNotionalWei ||
+          positionState[7] !== syncTargetHedgeNotionalWei ||
+          Boolean(positionState[10]) !== targetHedgeIsLong
+        )
       );
     if (syncNeeded) {
       const syncData = encodeFunctionData({
@@ -502,9 +520,9 @@ export const runKyuteWorkflowCycle = async (
         args: [
           config.userId,
           position.positionSide === "long",
-          targetHedgeNotionalWei,
-          positionState[3],
-          shouldHedge ? targetHedgeNotionalWei : 0n,
+          livePositionNotionalWei,
+          leverageForSync,
+          syncTargetHedgeNotionalWei,
           targetHedgeIsLong,
           oracleTimestamp,
         ],
@@ -529,7 +547,7 @@ export const runKyuteWorkflowCycle = async (
         BigInt(predictedAprBp),
         BigInt(confidenceBp),
         BigInt(contractBorosAprBp),
-        shouldHedge ? targetHedgeNotionalWei : 0n,
+        syncTargetHedgeNotionalWei,
         oracleTimestamp,
         proofHash,
       ],
