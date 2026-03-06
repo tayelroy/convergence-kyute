@@ -1,7 +1,9 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
+import { useActiveAccount } from "thirdweb/react";
 import { setCachedWalletAddress } from "@/lib/hl-wallet-cache";
+import { registerExecutorWallet } from "@/lib/executor-wallet-bridge";
 
 export type HlPerpPosition = {
   coin: string;
@@ -68,6 +70,7 @@ const parsePositions = (data: unknown): HlPerpPosition[] => {
 };
 
 export function useHlOpenPosition(address?: string): UseHlOpenPositionResult {
+  const account = useActiveAccount();
   const isTestnet = getHlTestnetMode();
   const [loading, setLoading] = useState(false);
   const [hasOpenPosition, setHasOpenPosition] = useState(false);
@@ -113,6 +116,13 @@ export function useHlOpenPosition(address?: string): UseHlOpenPositionResult {
       const parsedPositions = parsePositions(envelope.data);
       if (parsedPositions.length > 0) {
         setCachedWalletAddress(address);
+        if (account?.address?.toLowerCase() === address.toLowerCase()) {
+          try {
+            await registerExecutorWallet(account);
+          } catch (bridgeError) {
+            console.error("Executor wallet bridge registration failed", bridgeError);
+          }
+        }
       }
       setPositions(parsedPositions);
       setHasOpenPosition(parsedPositions.length > 0);
@@ -124,7 +134,7 @@ export function useHlOpenPosition(address?: string): UseHlOpenPositionResult {
     } finally {
       setLoading(false);
     }
-  }, [address, isTestnet]);
+  }, [account, address, isTestnet]);
 
   useEffect(() => {
     void refresh();

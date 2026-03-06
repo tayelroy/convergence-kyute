@@ -23,6 +23,7 @@ export interface HedgeEvent {
     reason?: string | null;
     action?: string | null;
     hedge_direction?: "open" | "close" | "unknown";
+    hedge_side?: "LONG" | "SHORT" | null;
     hedge_delta_eth?: number;
     running_size_eth?: number;
 }

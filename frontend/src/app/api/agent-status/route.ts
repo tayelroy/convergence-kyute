@@ -1,5 +1,7 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
+import fs from "node:fs";
+import path from "node:path";
 
 type SourceKey = "snapshots" | "hedges" | "aiLogs";
 
@@ -25,6 +27,7 @@ interface AgentStatusResponse {
 }
 
 type HedgeDirection = "open" | "close" | "unknown";
+type HedgeSide = "LONG" | "SHORT" | null;
 
 interface RawHedgeEvent {
     timestamp: string;
@@ -41,6 +44,7 @@ interface RawHedgeEvent {
 
 interface NormalizedHedgeEvent extends RawHedgeEvent {
     hedge_direction: HedgeDirection;
+    hedge_side: HedgeSide;
     hedge_delta_eth: number;
     running_size_eth: number;
 }
@@ -73,25 +77,48 @@ const parseHedgeDirection = (row: RawHedgeEvent): HedgeDirection => {
     return "unknown";
 };
 
+const parseHedgeSide = (row: RawHedgeEvent): HedgeSide => {
+    const text = `${row.action ?? ""} ${row.reason ?? ""} ${row.status ?? ""}`.toLowerCase();
+    if (text.includes("islong=false") || text.includes("side=short") || text.includes(" short")) {
+        return "SHORT";
+    }
+    if (text.includes("islong=true") || text.includes("side=long") || text.includes(" long")) {
+        return "LONG";
+    }
+    return null;
+};
+
 const normalizeHedgeEvents = (rows: RawHedgeEvent[]): NormalizedHedgeEvent[] => {
     const sortedAsc = [...rows].sort((a, b) => toMillis(a.timestamp) - toMillis(b.timestamp));
     let running = 0;
+    let side: HedgeSide = null;
 
     const normalizedAsc = sortedAsc.map((row) => {
         const amountEth = Number(row.amount_eth ?? 0);
         const amount = Number.isFinite(amountEth) ? Math.max(0, amountEth) : 0;
         const direction = parseHedgeDirection(row);
+        const parsedSide = parseHedgeSide(row);
         const isSuccess = String(row.status ?? "").toLowerCase() === "success";
         const previousRunning = running;
 
         if (isSuccess) {
             if (direction === "open") {
                 running += amount;
+                side = parsedSide ?? side;
             } else if (direction === "close") {
                 running = Math.max(0, running - amount);
+                if (running === 0) side = null;
             } else if (amount > 0) {
                 // Backward compatibility for older rows that stored absolute hedge amount only.
                 running = amount;
+                side = parsedSide ?? side;
+            }
+
+            if (running > 0 && parsedSide) {
+                side = parsedSide;
+            }
+            if (running === 0) {
+                side = null;
             }
         }
 
@@ -100,12 +127,76 @@ const normalizeHedgeEvents = (rows: RawHedgeEvent[]): NormalizedHedgeEvent[] => 
             ...row,
             amount_eth: amount,
             hedge_direction: direction,
+            hedge_side: running > 0 ? side : null,
             hedge_delta_eth: delta,
             running_size_eth: running,
         };
     });
 
     return normalizedAsc.sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp));
+};
+
+const findLatestRunJson = (scriptDirName: string): string | null => {
+    const broadcastRoot = path.resolve(process.cwd(), "../contracts/broadcast", scriptDirName);
+    if (!fs.existsSync(broadcastRoot)) return null;
+
+    let newestFile: string | null = null;
+    let newestMtime = -1;
+    for (const entry of fs.readdirSync(broadcastRoot, { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const runLatest = path.join(broadcastRoot, entry.name, "run-latest.json");
+        if (!fs.existsSync(runLatest)) continue;
+        const mtime = fs.statSync(runLatest).mtimeMs;
+        if (mtime > newestMtime) {
+            newestMtime = mtime;
+            newestFile = runLatest;
+        }
+    }
+    return newestFile;
+};
+
+const parseLatestContractAddress = (runFile: string, preferredContractNames: string[]): string | null => {
+    try {
+        const raw = fs.readFileSync(runFile, "utf8");
+        const json = JSON.parse(raw) as {
+            transactions?: Array<{ contractName?: string; contractAddress?: string; transactionType?: string }>;
+            receipts?: Array<{ contractAddress?: string }>;
+        };
+        const txs = json.transactions ?? [];
+        const preferred = txs.find((tx) =>
+            preferredContractNames.includes(String(tx.contractName ?? "")) &&
+            /^0x[a-fA-F0-9]{40}$/.test(String(tx.contractAddress ?? "")),
+        );
+        if (preferred?.contractAddress) return preferred.contractAddress.toLowerCase();
+
+        const created = [...txs]
+            .reverse()
+            .find((tx) =>
+                String(tx.transactionType ?? "").toUpperCase() === "CREATE" &&
+                /^0x[a-fA-F0-9]{40}$/.test(String(tx.contractAddress ?? "")),
+            );
+        if (created?.contractAddress) return created.contractAddress.toLowerCase();
+
+        const receipt = [...(json.receipts ?? [])]
+            .reverse()
+            .find((entry) => /^0x[a-fA-F0-9]{40}$/.test(String(entry.contractAddress ?? "")));
+        return receipt?.contractAddress?.toLowerCase() ?? null;
+    } catch {
+        return null;
+    }
+};
+
+const resolveActiveRouterAddress = (): string | null => {
+    const envCandidate = String(process.env.BOROS_ROUTER_ADDRESS ?? process.env.NEXT_PUBLIC_BOROS_ROUTER_ADDRESS ?? "")
+        .trim()
+        .toLowerCase();
+    if (/^0x[a-fA-F0-9]{40}$/.test(envCandidate) && envCandidate !== "0x0000000000000000000000000000000000000000") {
+        return envCandidate;
+    }
+
+    const runFile = findLatestRunJson("DeployMockBorosRouter.s.sol");
+    if (!runFile) return null;
+    return parseLatestContractAddress(runFile, ["MockBorosRouter"]);
 };
 
 export async function GET() {
@@ -142,12 +233,13 @@ export async function GET() {
         }
 
         const supabase = createClient(supabaseUrl, supabaseAnonKey);
+        const activeRouterAddress = resolveActiveRouterAddress();
 
         // Run all event queries in parallel
         const [snapshotsResult, hedgesResult, aiLogsResult, automationResult, functionsResult, feedResult, ccipResult] = await Promise.all([
             supabase
                 .from("kyute_events")
-                .select("timestamp, asset_symbol, boros_apr, hl_apr, spread_bps, vault_balance_eth")
+                .select("timestamp, asset_symbol, boros_apr, hl_apr, spread_bps, vault_balance_eth, market_address")
                 .eq("event_type", "snapshot")
                 .order("timestamp", { ascending: false })
                 .limit(50),
@@ -196,8 +288,16 @@ export async function GET() {
         ]);
 
         const warnings: string[] = [];
-        const snapshots = snapshotsResult.data ?? [];
-        const hedges = normalizeHedgeEvents((hedgesResult.data ?? []) as RawHedgeEvent[]);
+        const snapshotsRaw = snapshotsResult.data ?? [];
+        const hedgesRaw = (hedgesResult.data ?? []) as RawHedgeEvent[];
+        const snapshots = activeRouterAddress
+            ? snapshotsRaw.filter((row) => String((row as { market_address?: string | null }).market_address ?? "").toLowerCase() === activeRouterAddress)
+            : snapshotsRaw;
+        const hedges = normalizeHedgeEvents(
+            activeRouterAddress
+                ? hedgesRaw.filter((row) => String(row.market_address ?? "").toLowerCase() === activeRouterAddress)
+                : hedgesRaw,
+        );
         const aiLogs = aiLogsResult.data ?? [];
         const chainlinkAutomation = automationResult.data ?? [];
         const chainlinkFunctions = functionsResult.data ?? [];
