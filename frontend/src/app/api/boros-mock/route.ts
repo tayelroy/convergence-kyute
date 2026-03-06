@@ -21,8 +21,7 @@ const MOCK_BOROS_ABI = [
 ] as const;
 
 const isDemoMode = () => {
-  if (process.env.NEXT_PUBLIC_DEMO_MODE === "true") return true;
-  return process.env.NODE_ENV !== "production";
+  return process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 };
 
 const normalizeEnvString = (value: string | undefined | null): string =>

@@ -27,6 +27,10 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         bool hasBorosHedge;
         address yuToken;
         uint256 lastUpdateTimestamp;
+        uint256 targetHedgeNotional;
+        uint256 currentHedgeNotional;
+        bool currentHedgeIsLong;
+        bool targetHedgeIsLong;
     }
 
     // Spec mentions a per-user userId -> Position mapping, and address user mapping
@@ -43,6 +47,15 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         uint256 leverage
     );
     event HyperliquidPositionClosed(address indexed user);
+    event HyperliquidPositionSynced(
+        uint256 indexed userId,
+        address user,
+        bool isLong,
+        uint256 notional,
+        uint256 leverage,
+        uint256 targetHedgeNotional,
+        bool targetHedgeIsLong
+    );
     event BorosHedgeOpened(
         address indexed user,
         address yuToken,
@@ -56,6 +69,11 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         uint256 confidenceBp,
         bool hedged
     );
+    event UserAddressSynced(
+        uint256 indexed userId,
+        address previousUser,
+        address user
+    );
 
     error OracleStaleness(); // > 5m
     error TvlCapBreach();
@@ -63,6 +81,10 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
     error FeeBufferNotMet();
     error OnlyCRE();
     error UserIdAlreadyMapped();
+    error HedgeTargetMismatch();
+    error UserCollateralCapBreach();
+    error ActiveHedgeCannotRemap();
+    error TargetUserAlreadyInitialized();
 
     modifier onlyCRE() {
         if (msg.sender != creCallbackOperator) revert OnlyCRE();
@@ -86,6 +108,15 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         borosRouter = IBorosRouter(_router);
     }
 
+    function _validateOracleTimestamp(uint256 oracleTimestamp) internal view {
+        if (
+            oracleTimestamp > block.timestamp ||
+            block.timestamp - oracleTimestamp > MAX_ORACLE_DELAY
+        ) {
+            revert OracleStaleness();
+        }
+    }
+
     function openHyperliquidPosition(
         bytes calldata order,
         uint256 userId,
@@ -100,26 +131,111 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         if (mappedUser != address(0) && mappedUser != msg.sender) {
             revert UserIdAlreadyMapped();
         }
-        userIdToAddress[userId] = msg.sender;
+        address user = mappedUser == address(0) ? msg.sender : mappedUser;
+        userIdToAddress[userId] = user;
 
-        userPositions[msg.sender] = Position({
+        Position storage existing = userPositions[user];
+        userPositions[user] = Position({
             asset: asset,
             isLong: isLong,
             notional: notional,
             leverage: leverage,
-            hasBorosHedge: false,
-            yuToken: address(0),
-            lastUpdateTimestamp: block.timestamp
+            hasBorosHedge: existing.hasBorosHedge,
+            yuToken: existing.yuToken,
+            lastUpdateTimestamp: block.timestamp,
+            targetHedgeNotional: notional,
+            currentHedgeNotional: existing.currentHedgeNotional,
+            currentHedgeIsLong: existing.currentHedgeIsLong,
+            targetHedgeIsLong: existing.targetHedgeIsLong || !existing.hasBorosHedge
         });
 
         emit HyperliquidPositionOpened(
             userId,
-            msg.sender,
+            user,
             asset,
             isLong,
             notional,
             leverage
         );
+    }
+
+    function syncHyperliquidPosition(
+        uint256 userId,
+        bool isLong,
+        uint256 notional,
+        uint256 leverage,
+        uint256 targetHedgeNotional,
+        bool targetHedgeIsLong,
+        uint256 oracleTimestamp
+    ) external onlyCRE {
+        address user = userIdToAddress[userId];
+        require(user != address(0), "User not found");
+
+        Position storage pos = userPositions[user];
+
+        _validateOracleTimestamp(oracleTimestamp);
+
+        if (pos.asset == address(0)) {
+            pos.asset = address(asset());
+        }
+        pos.isLong = isLong;
+        pos.notional = notional;
+        pos.leverage = leverage;
+        pos.targetHedgeNotional = targetHedgeNotional;
+        pos.targetHedgeIsLong = targetHedgeIsLong;
+        pos.lastUpdateTimestamp = oracleTimestamp;
+
+        emit HyperliquidPositionSynced(
+            userId,
+            user,
+            isLong,
+            notional,
+            leverage,
+            targetHedgeNotional,
+            targetHedgeIsLong
+        );
+    }
+
+    function syncUserAddress(uint256 userId, address user) external onlyCRE {
+        require(user != address(0), "User not found");
+
+        address previousUser = userIdToAddress[userId];
+        if (previousUser == user) {
+            return;
+        }
+
+        if (previousUser != address(0)) {
+            Position storage previousPos = userPositions[previousUser];
+            if (
+                previousPos.hasBorosHedge ||
+                previousPos.currentHedgeNotional > 0
+            ) {
+                revert ActiveHedgeCannotRemap();
+            }
+
+            Position storage targetPos = userPositions[user];
+            if (
+                targetPos.asset != address(0) ||
+                targetPos.notional > 0 ||
+                targetPos.lastUpdateTimestamp > 0
+            ) {
+                revert TargetUserAlreadyInitialized();
+            }
+
+            if (
+                previousPos.asset != address(0) ||
+                previousPos.notional > 0 ||
+                previousPos.lastUpdateTimestamp > 0 ||
+                previousPos.targetHedgeNotional > 0 ||
+                previousPos.currentHedgeNotional > 0
+            ) {
+                userPositions[user] = previousPos;
+                delete userPositions[previousUser];
+            }
+        }
+
+        userIdToAddress[userId] = user;
+        emit UserAddressSynced(userId, previousUser, user);
     }
 
     function closeAllPositions(address user) external nonReentrant {
@@ -133,12 +249,15 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
 
         if (pos.hasBorosHedge) {
             address hedgeToken = pos.yuToken;
+            uint256 currentHedgeNotional = pos.currentHedgeNotional;
             // Effects before interaction to prevent stale-state reentrancy paths.
             pos.hasBorosHedge = false;
             pos.yuToken = address(0);
+            pos.currentHedgeNotional = 0;
+            pos.currentHedgeIsLong = false;
 
             borosRouter.closePosition(user, hedgeToken);
-            emit BorosHedgeClosed(user, hedgeToken, pos.notional);
+            emit BorosHedgeClosed(user, hedgeToken, currentHedgeNotional);
         }
 
         emit HyperliquidPositionClosed(user);
@@ -164,56 +283,82 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         require(pos.notional > 0, "No open position");
 
         // 1. Check Oracle Staleness Guard (>5m)
-        if (
-            oracleTimestamp > block.timestamp ||
-            block.timestamp - oracleTimestamp > MAX_ORACLE_DELAY
-        ) {
-            revert OracleStaleness();
-        }
+        _validateOracleTimestamp(oracleTimestamp);
 
         // 2. Confidence Guard
         if (confidenceBp < MIN_CONFIDENCE_BP) {
             revert InsufficientConfidence();
         }
 
-        // 3. Check TVL per hedge cap (10%)
-        // Notional should not exceed 10% of vault's totalAssets
-        uint256 vaultTvl = totalAssets();
-        if (hedgeNotional > (vaultTvl * MAX_TVL_HEDGE_BP) / 10000) {
-            revert TvlCapBreach();
+        uint256 hedgeTarget = pos.targetHedgeNotional;
+        if (hedgeNotional != 0 && hedgeNotional != hedgeTarget) {
+            revert HedgeTargetMismatch();
         }
 
         // 4. Calculate buffer constraint (predicted APR must outpace Boros APR by > 0.1%)
         // APRs in basis points maybe? Or actual %. As per spec: predicted savings > 0.1% buffer
         // E.g. predictedApr (bp) - borosApr (bp) > 10 (FEE_BUFFER_BP = 10 bp = 0.1%)
         if (shouldHedge) {
+            // Notional should not exceed 10% of vault TVL and must fit inside the user's ERC4626 balance.
+            uint256 vaultTvl = totalAssets();
+            if (hedgeTarget > (vaultTvl * MAX_TVL_HEDGE_BP) / 10000) {
+                revert TvlCapBreach();
+            }
+
+            uint256 userAssetBalance = convertToAssets(balanceOf(user));
+            if (hedgeTarget > userAssetBalance) {
+                revert UserCollateralCapBreach();
+            }
+
             if (predictedApr <= borosApr + int256(FEE_BUFFER_BP)) {
                 revert FeeBufferNotMet();
             }
         }
 
         // Execution
-        if (shouldHedge && !pos.hasBorosHedge) {
-            // Open hedge
-            // Long HL -> open Long YU; Short HL -> open Short YU
-            bool hedgeIsLong = pos.isLong;
+        if (shouldHedge) {
+            bool hedgeIsLong = pos.targetHedgeIsLong;
+            bool hedgeConfigMatches =
+                pos.hasBorosHedge &&
+                pos.yuToken == yuToken &&
+                pos.currentHedgeNotional == hedgeTarget &&
+                pos.currentHedgeIsLong == hedgeIsLong;
 
-            // Effects before interaction to prevent stale-state reentrancy paths.
-            pos.hasBorosHedge = true;
-            pos.yuToken = yuToken;
-            borosRouter.openPosition(user, yuToken, hedgeNotional, hedgeIsLong);
+            if (pos.hasBorosHedge && !hedgeConfigMatches) {
+                address hedgeToken = pos.yuToken;
+                uint256 currentHedgeNotional = pos.currentHedgeNotional;
 
-            emit BorosHedgeOpened(user, yuToken, hedgeNotional, hedgeIsLong);
+                pos.hasBorosHedge = false;
+                pos.yuToken = address(0);
+                pos.currentHedgeNotional = 0;
+                pos.currentHedgeIsLong = false;
+
+                borosRouter.closePosition(user, hedgeToken);
+                emit BorosHedgeClosed(user, hedgeToken, currentHedgeNotional);
+            }
+
+            if (!hedgeConfigMatches && hedgeTarget > 0) {
+                pos.hasBorosHedge = true;
+                pos.yuToken = yuToken;
+                pos.currentHedgeNotional = hedgeTarget;
+                pos.currentHedgeIsLong = hedgeIsLong;
+
+                borosRouter.openPosition(user, yuToken, hedgeTarget, hedgeIsLong);
+                emit BorosHedgeOpened(user, yuToken, hedgeTarget, hedgeIsLong);
+            }
         } else if (!shouldHedge && pos.hasBorosHedge) {
             // Close hedge
             address hedgeToken = pos.yuToken;
+            uint256 currentHedgeNotional = pos.currentHedgeNotional;
             // Effects before interaction to prevent stale-state reentrancy paths.
             pos.hasBorosHedge = false;
             pos.yuToken = address(0);
+            pos.currentHedgeNotional = 0;
+            pos.currentHedgeIsLong = false;
 
             borosRouter.closePosition(user, hedgeToken);
 
-            emit BorosHedgeClosed(user, hedgeToken, hedgeNotional);
+            emit BorosHedgeClosed(user, hedgeToken, currentHedgeNotional);
         }
 
         // Persist the latest oracle observation timestamp.

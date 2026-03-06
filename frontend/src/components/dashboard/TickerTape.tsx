@@ -1,81 +1,45 @@
 import React from "react";
-import { ArrowUpRight, ArrowDownRight, Activity } from "lucide-react";
+import { Activity } from "lucide-react";
 
 interface TickerTapeProps {
-    assetSymbol?: string;
     borosRate?: number | null;
     hyperliquidRate?: number | null;
     spreadBps?: number | null;
-    borosChangePct?: number | null;
-    hlChangePct?: number | null;
-    spreadChangePct?: number | null;
+    lastSyncLabel?: string | null;
     degraded?: boolean;
 }
 
-interface TickerItemProps {
-    symbol: string;
-    price: number | null | undefined;
-    change?: number | null;
-    isSpread?: boolean;
-}
-
-function TickerItem({ symbol, price, change, isSpread }: TickerItemProps) {
-    const hasChange = typeof change === "number" && Number.isFinite(change);
-    const isPositive = hasChange ? change >= 0 : true;
-    const displayPrice =
-        price == null
-            ? "—"
-            : isSpread
-            ? `${price.toFixed(2)} bps`
-            : `${price.toFixed(4)}%`;
-
-    return (
-        <div className="flex items-center space-x-3 px-6 border-r border-[#1a1a1a]">
-            <span className="font-bold text-[#888]">{symbol}</span>
-            <span className={isSpread ? "text-blue-400" : "text-white"}>
-                {displayPrice}
-            </span>
-            {hasChange ? (
-                <div className={`flex items-center text-xs ${isPositive ? "text-[#00ff00]" : "text-[#ff0000]"}`}>
-                    {isPositive ? <ArrowUpRight size={14} /> : <ArrowDownRight size={14} />}
-                    <span className="ml-1">{Math.abs(change as number).toFixed(2)}%</span>
-                </div>
-            ) : (
-                <div className="text-xs text-[#666]">--</div>
-            )}
-        </div>
-    );
-}
-
 export function TickerTape({
-    assetSymbol = "ETH",
     borosRate = null,
     hyperliquidRate = null,
     spreadBps = null,
-    borosChangePct = null,
-    hlChangePct = null,
-    spreadChangePct = null,
+    lastSyncLabel = null,
     degraded = false,
 }: TickerTapeProps) {
-    const items = (
-        <>
-            <TickerItem symbol={`${assetSymbol} Boros`} price={borosRate} change={borosChangePct} />
-            <TickerItem symbol={`${assetSymbol} HL`} price={hyperliquidRate} change={hlChangePct} />
-            <TickerItem symbol={`${assetSymbol} Spread`} price={spreadBps} change={spreadChangePct} isSpread />
-            <div className="flex items-center px-6 text-[#444] text-xs border-r border-[#1a1a1a]">
-                <Activity size={12} className="mr-2" />
-                {borosRate == null ? "LOADING..." : degraded ? "MARKET STATUS: DEGRADED" : "MARKET STATUS: ACTIVE"}
-            </div>
-        </>
-    );
+    const statusLabel = degraded ? "DEGRADED" : "ACTIVE";
+    const borosLabel = borosRate == null ? "—" : `${borosRate.toFixed(4)}%`;
+    const hlLabel = hyperliquidRate == null ? "—" : `${hyperliquidRate.toFixed(4)}%`;
+    const spreadLabel = spreadBps == null ? "—" : `${spreadBps.toFixed(2)} bps`;
 
     return (
-        <div className="w-full h-10 bg-[#0a0a0a] border-b border-[#1a1a1a] flex items-center overflow-hidden whitespace-nowrap">
-            <div className="animate-ticker flex">
-                {/* 1st set — seamless loop */}
-                <div className="flex shrink-0">{items}</div>
-                {/* 2nd set — duplicate for seamless loop */}
-                <div className="flex shrink-0">{items}</div>
+        <div className="w-full h-10 px-4 border-b border-[#1a1a1a] bg-[#060909] flex items-center justify-between overflow-hidden">
+            <div className="flex items-center gap-6 min-w-0 text-xs font-mono uppercase tracking-wide whitespace-nowrap">
+                <div className="flex items-center gap-2 text-emerald-400">
+                    <Activity size={10} />
+                    <span>{statusLabel}</span>
+                </div>
+                <span className="hidden sm:inline text-[#8b92a5]">
+                    BOROS <span className="text-emerald-400">{borosLabel}</span>
+                </span>
+                <span className="hidden md:inline text-[#8b92a5]">
+                    HYPERLIQUID <span className="text-white">{hlLabel}</span>
+                </span>
+                <span className="hidden lg:inline text-[#8b92a5]">
+                    SPREAD <span className="text-[#53a2ff]">{spreadLabel}</span>
+                </span>
+            </div>
+            <div className="text-xs font-mono uppercase tracking-wide text-[#6a7283] whitespace-nowrap">
+                SYS_TIME: {lastSyncLabel ?? "--"}
             </div>
         </div>
     );

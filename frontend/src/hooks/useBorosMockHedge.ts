@@ -8,11 +8,10 @@ type BorosMockResponse = {
 };
 
 const POLL_INTERVAL_MS = 30_000;
-const WEI_PER_ETH = 1e18;
+const WEI_PER_TOKEN = 1e18;
 
 const isDemoMode = (): boolean => {
-  if (process.env.NEXT_PUBLIC_DEMO_MODE === "true") return true;
-  return process.env.NODE_ENV !== "production";
+  return process.env.NEXT_PUBLIC_DEMO_MODE === "true";
 };
 
 export function useBorosMockHedge(userAddress?: string, tokenAddress?: string) {
@@ -61,10 +60,10 @@ export function useBorosMockHedge(userAddress?: string, tokenAddress?: string) {
     };
   }, [tokenAddress, userAddress]);
 
-  const amountEth = useMemo(() => {
+  const amountYu = useMemo(() => {
     const asNumber = Number(amount);
     if (!Number.isFinite(asNumber) || asNumber <= 0) return 0;
-    return asNumber / WEI_PER_ETH;
+    return asNumber / WEI_PER_TOKEN;
   }, [amount]);
 
   return {
@@ -72,9 +71,8 @@ export function useBorosMockHedge(userAddress?: string, tokenAddress?: string) {
     loading,
     error,
     amount,
-    amountEth,
+    amountYu,
     isLong,
     isActive: amount !== "0",
   };
 }
-

@@ -17,6 +17,7 @@ ANVIL_DEPLOYER="0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 DEFAULT_FORK_URL="https://arb1.arbitrum.io/rpc"
 DEMO_USER_ID_DEFAULT=123
 DEFAULT_YU_TOKEN="0x0000000000000000000000000000000000000001"
+DEMO_POSITION_NOTIONAL_WEI_DEFAULT=1000000000000000000
 
 require_dotenv_var() {
     local key="$1"
@@ -104,7 +105,10 @@ FORK_BLOCK_NUMBER="${FORK_BLOCK_NUMBER:-}"
 DEMO_NO_FORK="${DEMO_NO_FORK:-true}"
 DEMO_USER_ID="${DEMO_USER_ID:-${DEMO_USER_ID_DEFAULT}}"
 DEMO_EXEC_MODE="${DEMO_EXEC_MODE:-direct}"
+DEMO_POSITION_NOTIONAL_WEI="${DEMO_POSITION_NOTIONAL_WEI:-${DEMO_POSITION_NOTIONAL_WEI_DEFAULT}}"
+DEMO_HL_POSITION_TESTNET="${DEMO_HL_POSITION_TESTNET:-true}"
 export ANVIL_RPC_URL="${DEMO_RPC_URL}"
+export DEMO_HL_POSITION_TESTNET
 ANVIL_PORT="${ANVIL_PORT:-8545}"
 
 # ── 2. Boot Local Arbitrum Fork ───────────────────
@@ -176,7 +180,63 @@ sync_frontend_demo_env() {
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "ANVIL_RPC_URL" "${DEMO_RPC_URL}"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "BOROS_ROUTER_ADDRESS" "${BOROS_ROUTER_ADDRESS}"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "BOROS_YU_TOKEN" "${DEFAULT_YU_TOKEN}"
+    upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_KYUTE_CHAIN_ID" "31337"
     echo "   ✓ Synced frontend demo env at ${FRONTEND_ENV_LOCAL}"
+}
+
+sync_direct_hl_env() {
+    if [ -n "${HL_ADDRESS:-}" ]; then
+        export KYUTE_ALLOW_DEMO_HL_ADDRESS="${KYUTE_ALLOW_DEMO_HL_ADDRESS:-true}"
+        echo "   ✓ Using explicit HL_ADDRESS=${HL_ADDRESS} for direct hedge sizing"
+        return
+    fi
+
+    if [ ! -f "${KYUTE_STAGING_CONFIG}" ] || ! command -v node >/dev/null 2>&1; then
+        return
+    fi
+
+    local staging_hl_address
+    staging_hl_address=$(node -e '
+        const fs = require("fs");
+        const path = process.argv[1];
+        const json = JSON.parse(fs.readFileSync(path, "utf8"));
+        const hlAddress = typeof json.hlAddress === "string" ? json.hlAddress.trim() : "";
+        process.stdout.write(hlAddress);
+    ' "${KYUTE_STAGING_CONFIG}" 2>/dev/null || true)
+
+    if [ -n "${staging_hl_address}" ]; then
+        export HL_ADDRESS="${staging_hl_address}"
+        export KYUTE_ALLOW_DEMO_HL_ADDRESS="${KYUTE_ALLOW_DEMO_HL_ADDRESS:-true}"
+        echo "   ✓ Using staging HL wallet ${HL_ADDRESS} for direct hedge sizing"
+    fi
+}
+
+resolve_canonical_demo_wallet() {
+    if [[ "${HL_ADDRESS:-}" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        printf '%s' "${HL_ADDRESS}"
+        return
+    fi
+
+    if [[ "${DEMO_HL_ADDRESS:-}" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        printf '%s' "${DEMO_HL_ADDRESS}"
+        return
+    fi
+
+    if [ -f "${KYUTE_STAGING_CONFIG}" ] && command -v node >/dev/null 2>&1; then
+        local staging_hl_address
+        staging_hl_address=$(node -e '
+            const fs = require("fs");
+            const path = process.argv[1];
+            const json = JSON.parse(fs.readFileSync(path, "utf8"));
+            const hlAddress = typeof json.hlAddress === "string" ? json.hlAddress.trim() : "";
+            process.stdout.write(hlAddress);
+        ' "${KYUTE_STAGING_CONFIG}" 2>/dev/null || true)
+
+        if [[ "${staging_hl_address}" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+            printf '%s' "${staging_hl_address}"
+            return
+        fi
+    fi
 }
 
 deploy_mock_router() {
@@ -238,12 +298,17 @@ seed_demo_state() {
         return
     fi
 
-    echo "   • Seeding vault TVL + mapping userId=${DEMO_USER_ID} to ${demo_user}..."
+    local canonical_user
+    canonical_user=$(resolve_canonical_demo_wallet || true)
+    if [ -z "${canonical_user}" ]; then
+        canonical_user="${demo_user}"
+    fi
+
+    echo "   • Seeding vault TVL to ${canonical_user} (canonical wallet); no demo userId mapping will be created..."
     cast send "${BOROS_COLLATERAL_ADDRESS}" "mint(address,uint256)" "${demo_user}" 1000000000000000000000 --private-key "${ANVIL_PRIVATE_KEY}" --rpc-url "${DEMO_RPC_URL}" >/tmp/kyute_seed_mint.log 2>&1 || true
     cast send "${BOROS_COLLATERAL_ADDRESS}" "approve(address,uint256)" "${VAULT_ADDRESS}" 1000000000000000000000 --private-key "${ANVIL_PRIVATE_KEY}" --rpc-url "${DEMO_RPC_URL}" >/tmp/kyute_seed_approve.log 2>&1 || true
-    cast send "${VAULT_ADDRESS}" "deposit(uint256,address)" 100000000000000000000 "${demo_user}" --private-key "${ANVIL_PRIVATE_KEY}" --rpc-url "${DEMO_RPC_URL}" >/tmp/kyute_seed_deposit.log 2>&1 || true
-    cast send "${VAULT_ADDRESS}" "openHyperliquidPosition(bytes,uint256,address,bool,uint256,uint256)" 0x "${DEMO_USER_ID}" "${BOROS_COLLATERAL_ADDRESS}" true 1000000000000000000 1 --private-key "${ANVIL_PRIVATE_KEY}" --rpc-url "${DEMO_RPC_URL}" >/tmp/kyute_seed_map.log 2>&1 || true
-    echo "   ✓ Seed/map attempted (logs: /tmp/kyute_seed_*.log)"
+    cast send "${VAULT_ADDRESS}" "deposit(uint256,address)" 100000000000000000000 "${canonical_user}" --private-key "${ANVIL_PRIVATE_KEY}" --rpc-url "${DEMO_RPC_URL}" >/tmp/kyute_seed_deposit.log 2>&1 || true
+    echo "   ✓ Seed deposit attempted (logs: /tmp/kyute_seed_*.log)"
 }
 
 # In no-fork mode we always deploy local collateral token.
@@ -256,6 +321,7 @@ if [ -z "${BOROS_ROUTER_ADDRESS:-}" ] || [ "${BOROS_ROUTER_ADDRESS}" = "0x000000
     deploy_mock_router
 fi
 sync_frontend_demo_env
+sync_direct_hl_env
 
 # ── 3. Deploy kYUteVault ──────────────────────────
 echo "[2/4] Deploying kYUteVault to local fork..."
@@ -281,8 +347,13 @@ echo "   • deploy metadata: ${DEPLOY_RUN_JSON}"
 export KYUTE_VAULT_ADDRESS="${VAULT_ADDRESS}"
 export BOROS_YU_TOKEN="${DEFAULT_YU_TOKEN}"
 export DEMO_USER_ID
-export DEMO_SHOULD_HEDGE="${DEMO_SHOULD_HEDGE:-true}"
-export DEMO_HEDGE_NOTIONAL_WEI="${DEMO_HEDGE_NOTIONAL_WEI:-1000000000000000000}"
+upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_KYUTE_VAULT_ADDRESS" "${VAULT_ADDRESS}"
+if [ -n "${DEMO_SHOULD_HEDGE:-}" ]; then
+    export DEMO_SHOULD_HEDGE
+fi
+if [ -n "${DEMO_FORCE_HEDGE:-}" ]; then
+    export DEMO_FORCE_HEDGE
+fi
 
 if [ -f "${KYUTE_STAGING_CONFIG}" ]; then
     if command -v node >/dev/null 2>&1; then

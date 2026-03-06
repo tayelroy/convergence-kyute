@@ -20,6 +20,12 @@ export interface HedgeEvent {
     amount_eth: number;
     market_address: string;
     status: string;
+    reason?: string | null;
+    action?: string | null;
+    hedge_direction?: "open" | "close" | "unknown";
+    hedge_side?: "LONG" | "SHORT" | null;
+    hedge_delta_eth?: number;
+    running_size_eth?: number;
 }
 
 export interface AiDecision {
