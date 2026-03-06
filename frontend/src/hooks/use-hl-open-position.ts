@@ -72,7 +72,7 @@ const parsePositions = (data: unknown): HlPerpPosition[] => {
 export function useHlOpenPosition(address?: string): UseHlOpenPositionResult {
   const account = useActiveAccount();
   const isTestnet = getHlTestnetMode();
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(Boolean(address));
   const [hasOpenPosition, setHasOpenPosition] = useState(false);
   const [positions, setPositions] = useState<HlPerpPosition[]>([]);
   const [error, setError] = useState<string | null>(null);
@@ -137,8 +137,9 @@ export function useHlOpenPosition(address?: string): UseHlOpenPositionResult {
   }, [account, address, isTestnet]);
 
   useEffect(() => {
+    setLoading(Boolean(address));
     void refresh();
-  }, [refresh]);
+  }, [address, refresh]);
 
   return { loading, hasOpenPosition, positions, isTestnet, error, refresh };
 }
