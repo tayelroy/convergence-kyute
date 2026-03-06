@@ -4,6 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
     LayoutDashboard,
+    BrainCircuit,
     Layers,
     History,
     Settings,
@@ -13,6 +14,7 @@ import { cn } from "@/lib/utils";
 
 const navItems = [
     { label: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
+    { label: "Strategy", href: "/strategy", icon: BrainCircuit },
     { label: "Positions", href: "/positions", icon: Layers },
     { label: "History", href: "/history", icon: History },
     { label: "Settings", href: "/settings", icon: Settings },

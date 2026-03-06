@@ -18,7 +18,9 @@ import {
   type HedgeMode,
   type PositionSide,
 } from "./hedge-policy.js";
+import { buildHedgeExecutionPlan } from "./hedge-execution-plan.js";
 import { fetchBorosImpliedAprQuote } from "./boros.js";
+import { resolveUserHedgeMode } from "./strategy-config.js";
 import { readWalletBridgeRecord, resolveWalletUserId } from "./wallet-bridge.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), "../contracts/.env"), quiet: true });
@@ -358,7 +360,7 @@ const resolveHyperliquidInfoUrl = (kind: "funding" | "position"): string => {
   return HL_MAINNET_INFO_URL;
 };
 
-const resolveHedgeMode = (): HedgeMode => {
+const resolveConfiguredHedgeMode = (): HedgeMode => {
   const raw = (process.env.KYUTE_HEDGE_MODE ?? process.env.DEMO_HEDGE_MODE ?? "adverse_only")
     .trim()
     .toLowerCase();
@@ -586,7 +588,7 @@ async function main() {
   const entryThresholdBp = parseNumberEnv("DEMO_ENTRY_THRESHOLD_BP", DEFAULT_ENTRY_THRESHOLD_BP);
   const exitThresholdBp = parseNumberEnv("DEMO_EXIT_THRESHOLD_BP", DEFAULT_EXIT_THRESHOLD_BP);
   const borosOiFeeBp = parseNumberEnv("DEMO_BOROS_OI_FEE_BP", DEFAULT_BOROS_OI_FEE_BP);
-  const hedgeMode = resolveHedgeMode();
+  const configuredHedgeMode = resolveConfiguredHedgeMode();
 
   const account = privateKeyToAccount(privateKey as `0x${string}`);
   const publicClient = createPublicClient({ transport: http(rpcUrl) });
@@ -758,6 +760,21 @@ async function main() {
     }
   }
 
+  const strategyMode = await resolveUserHedgeMode({
+    userId,
+    walletAddress: hlLookupAddress ?? (mappedUser.toLowerCase() === ZERO_ADDRESS.toLowerCase() ? null : mappedUser),
+    vaultAddress,
+    fallbackMode: configuredHedgeMode,
+    logger: (message) => console.log(`[direct-hedge] ${message}`),
+  });
+  const hedgeMode = strategyMode.mode;
+  console.log(
+    `[direct-hedge] strategy mode source=${strategyMode.source} mode=${hedgeMode} wallet=${hlLookupAddress ?? mappedUser} userId=${userId}`,
+  );
+  if (strategyMode.warning) {
+    console.log(`[direct-hedge] strategy mode warning=${strategyMode.warning}`);
+  }
+
   console.log(
     `[direct-hedge] policy inputs side=${hlSide} averageFundingBp=${averageFundingBp} borosImpliedAprBp=${borosImpliedAprBp} confidenceBp=${confidenceBp} mode=${hedgeMode} entryBp=${entryThresholdBp} exitBp=${exitThresholdBp} oiFeeBp=${borosOiFeeBp}`,
   );
@@ -775,38 +792,31 @@ async function main() {
     oiFeeBp: borosOiFeeBp,
     mode: hedgeMode,
   });
-  let targetHedgeIsLong = decision.targetHedgeIsLong;
-  let targetHedgeNotionalWei = proposedTargetHedgeNotionalWei;
-  let shouldHedge = decision.shouldHedge && targetHedgeNotionalWei > 0n;
   if (forceHedgeOverride !== null) {
-    shouldHedge = forceHedgeOverride && targetHedgeNotionalWei > 0n;
     targetSource = `${targetSource}+forced`;
   }
-  if (!shouldHedge) {
-    targetHedgeNotionalWei = 0n;
-  }
+  const executionPlan = buildHedgeExecutionPlan({
+    decision,
+    proposedTargetHedgeNotionalWei,
+    currentHedgeWei: storedCurrentHedgeNotionalWei,
+    hasExistingHedge: hasBorosHedgeBefore,
+    currentHedgeIsLong: storedCurrentHedgeIsLong,
+    rebalanceThresholdBp,
+    minRebalanceDeltaWei,
+    forceHedgeOverride,
+  });
+  const targetHedgeIsLong = executionPlan.targetHedgeIsLong;
+  const targetHedgeNotionalWei = executionPlan.targetHedgeNotionalWei;
+  const shouldHedge = executionPlan.shouldHedge;
   if (targetHedgeNotionalWei === 0n) {
     console.log("[direct-hedge] target notional is zero; forcing shouldHedge=false for this cycle");
   }
 
   const currentHedgeWei = storedCurrentHedgeNotionalWei;
-  const proposedDeltaWei = proposedTargetHedgeNotionalWei > currentHedgeWei
-    ? proposedTargetHedgeNotionalWei - currentHedgeWei
-    : currentHedgeWei - proposedTargetHedgeNotionalWei;
-  const bpThresholdWei = (currentHedgeWei * rebalanceThresholdBp) / 10_000n;
-  const requiredDeltaWei = bpThresholdWei > minRebalanceDeltaWei ? bpThresholdWei : minRebalanceDeltaWei;
-  const driftBelowThreshold =
-    hasBorosHedgeBefore &&
-    shouldHedge &&
-    currentHedgeWei > 0n &&
-    storedCurrentHedgeIsLong === targetHedgeIsLong &&
-    proposedDeltaWei < requiredDeltaWei;
-  if (driftBelowThreshold) {
-    targetHedgeNotionalWei = currentHedgeWei;
-  }
-  const targetDeltaWei = targetHedgeNotionalWei > currentHedgeWei
-    ? targetHedgeNotionalWei - currentHedgeWei
-    : currentHedgeWei - targetHedgeNotionalWei;
+  const proposedDeltaWei = executionPlan.proposedDeltaWei;
+  const requiredDeltaWei = executionPlan.requiredDeltaWei;
+  const driftBelowThreshold = executionPlan.driftBelowThreshold;
+  const targetDeltaWei = executionPlan.targetDeltaWei;
 
   const leverageForSync = storedLeverage > 0n ? storedLeverage : 1n;
   const syncNeeded =
@@ -851,10 +861,8 @@ async function main() {
   }
 
   const hedgeAlreadyMatches =
-    hasBorosHedgeBefore &&
-    storedYuToken.toLowerCase() === yuToken.toLowerCase() &&
-    storedCurrentHedgeNotionalWei == targetHedgeNotionalWei &&
-    storedCurrentHedgeIsLong === targetHedgeIsLong;
+    executionPlan.hedgeAlreadyMatches &&
+    storedYuToken.toLowerCase() === yuToken.toLowerCase();
   const executeNeeded =
     (!shouldHedge && hasBorosHedgeBefore) ||
     (shouldHedge && (!hasBorosHedgeBefore || !hedgeAlreadyMatches));

@@ -1,6 +1,7 @@
 "use client";
 
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { Area, AreaChart, CartesianGrid, Tooltip, XAxis, YAxis } from "recharts";
+import { useElementSize } from "@/hooks/use-element-size";
 import { cn } from "@/lib/utils";
 
 type HedgePoint = {
@@ -35,12 +36,13 @@ export function BorosHedgeChart({
   modeLabel = null,
   className,
 }: BorosHedgeChartProps) {
+  const { ref: chartRef, size } = useElementSize<HTMLDivElement>();
   const hasHedge = Number(currentAmountYu ?? 0) > 0.0000001;
   const sizeLabel = loading ? "..." : hasHedge ? `${Number(currentAmountYu ?? 0).toFixed(4)} YU` : "No hedge";
   const updatedLabel = lastUpdatedAt ?? "--";
 
   return (
-    <div className={cn("w-full min-w-0 h-full border border-[#1a1a1a] bg-[linear-gradient(180deg,#0a0a0a,#080808)] rounded-sm p-4 flex flex-col", className)}>
+    <div className={cn("w-full min-w-0 min-h-[360px] overflow-hidden border border-[#1a1a1a] bg-[linear-gradient(180deg,#0a0a0a,#080808)] rounded-sm p-4", className)}>
       <div className="flex items-center justify-between mb-3 shrink-0">
         <div>
           <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">BOROS HEDGE (YU)</h3>
@@ -57,15 +59,15 @@ export function BorosHedgeChart({
       </div>
 
       {loading && points.length === 0 ? (
-        <div className="min-h-0 flex-1 flex items-center justify-center text-xs text-[#666] font-mono">Loading chart...</div>
+        <div className="flex h-[280px] items-center justify-center text-xs font-mono text-[#666]">Loading chart...</div>
       ) : points.length === 0 ? (
-        <div className="min-h-0 flex-1 flex items-center justify-center text-xs text-[#666] font-mono">
+        <div className="flex h-[280px] items-center justify-center text-xs font-mono text-[#666]">
           No hedge history yet.
         </div>
       ) : (
-        <div className="min-h-0 flex-1 min-w-0">
-          <ResponsiveContainer width="100%" height="100%">
-            <AreaChart data={points}>
+        <div ref={chartRef} className="h-[280px] min-w-0 w-full overflow-hidden">
+          {size.width > 0 && size.height > 0 ? (
+            <AreaChart width={size.width} height={size.height} data={points} margin={{ top: 8, right: 8, bottom: 8, left: -20 }}>
               <defs>
                 <linearGradient id="borosHedgeGradient" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="0%" stopColor="#5ad8a6" stopOpacity={0.35} />
@@ -80,7 +82,7 @@ export function BorosHedgeChart({
                 stroke="#252525"
                 minTickGap={30}
               />
-              <YAxis tick={{ fill: "#666", fontSize: 10 }} stroke="#252525" width={50} />
+              <YAxis tick={{ fill: "#666", fontSize: 10 }} stroke="#252525" width={44} />
               <Tooltip
                 contentStyle={{ background: "#090909", border: "1px solid #2a2a2a", color: "#fff" }}
                 labelFormatter={(value) => formatTs(Number(value))}
@@ -95,7 +97,7 @@ export function BorosHedgeChart({
                 dot={false}
               />
             </AreaChart>
-          </ResponsiveContainer>
+          ) : null}
         </div>
       )}
     </div>

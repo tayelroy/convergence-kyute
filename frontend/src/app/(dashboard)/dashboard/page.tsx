@@ -84,10 +84,12 @@ export default function DashboardPage() {
 
         if (isForcedExecutionMode && liveBoros.enabled) {
             const currentAmountYu = Math.max(0, Number(liveBoros.amountYu ?? 0));
-            const now = Date.now();
+            const currentPointTs = hedgeLastTimestamp
+                ? new Date(hedgeLastTimestamp).getTime()
+                : zeroSeriesSeed;
             const lastPoint = points[points.length - 1] ?? null;
             if (!lastPoint || Math.abs(lastPoint.amountYu - currentAmountYu) > 0.0000001) {
-                points.push({ timestamp: now, amountYu: currentAmountYu });
+                points.push({ timestamp: currentPointTs, amountYu: currentAmountYu });
             }
         }
 
@@ -96,7 +98,7 @@ export default function DashboardPage() {
             { timestamp: zeroSeriesSeed - 30 * 60 * 1000, amountYu: 0 },
             { timestamp: zeroSeriesSeed, amountYu: 0 },
         ];
-    }, [hedges, isForcedExecutionMode, liveBoros.amountYu, liveBoros.enabled, zeroSeriesSeed]);
+    }, [hedges, hedgeLastTimestamp, isForcedExecutionMode, liveBoros.amountYu, liveBoros.enabled, zeroSeriesSeed]);
     const spreadBps = live.hlSpreadBps ?? latest?.spread_bps ?? null;
     const yieldAlert = spreadBps != null
         ? `Spread is ${spreadBps.toFixed(1)} bps (HL ${hlAprDisplay} vs Boros ${borosAprDisplay}); ${hasHedge ? `hedge is active${hedgeSide ? ` (${hedgeSide})` : ""}.` : "no hedge is open."}`
@@ -107,7 +109,7 @@ export default function DashboardPage() {
     const alertTitle = hasHedge ? "HEDGE INTERVENTION REQUIRED" : "MONITORING SPREAD";
 
     return (
-        <DashboardLayout className="h-[100dvh] overflow-hidden">
+        <DashboardLayout className="min-h-full">
             <TickerTape
                 borosRate={live.borosImpliedApr ?? latest?.boros_apr}
                 hyperliquidRate={live.hlFundingApr}
@@ -116,8 +118,8 @@ export default function DashboardPage() {
                 degraded={degraded}
             />
 
-            <main className="flex-1 min-h-0 p-3 md:p-4 overflow-y-auto lg:overflow-hidden">
-                <div className="h-full grid grid-cols-1 gap-3 lg:grid-cols-12 lg:grid-rows-[minmax(0,0.8fr)_minmax(0,1.35fr)_minmax(0,1fr)]">
+            <main className="p-3 md:p-4">
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
                     <div className="min-h-0 border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-6">
                         <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">YIELD ALERT</h3>
                         <div className="mt-3 rounded-sm border border-[#7a3d15] bg-[#2a1708] px-4 py-3">
@@ -140,7 +142,7 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    <div className="min-h-0 border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-3">
+                    <div className="min-h-[180px] border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-3">
                         <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">BOROS FUNDING</h3>
                         <div className="mt-6 text-center">
                             <p className="text-[10px] text-[#666] font-mono uppercase">IMPLIED APR</p>
@@ -149,7 +151,7 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    <div className="min-h-0 border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-3">
+                    <div className="min-h-[180px] border border-[#1a1a1a] bg-[linear-gradient(180deg,#090b0f,#07090c)] rounded-sm p-4 lg:col-span-3">
                         <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">HL FUNDING</h3>
                         <div className="mt-6 text-center">
                             <p className="text-[10px] text-[#666] font-mono uppercase">LIVE RATE</p>
@@ -158,7 +160,7 @@ export default function DashboardPage() {
                         </div>
                     </div>
 
-                    <div className="min-h-0 lg:col-span-6">
+                    <div className="min-h-0 min-w-0 lg:col-span-6">
                         <UserPositionHistoryChart
                             points={live.historyPoints}
                             currentSizeEth={live.totalOpenNow}
@@ -167,7 +169,7 @@ export default function DashboardPage() {
                         />
                     </div>
 
-                    <div className="min-h-0 lg:col-span-6">
+                    <div className="min-h-0 min-w-0 lg:col-span-6">
                         <BorosHedgeChart
                             points={hedgeHistoryPoints}
                             currentAmountYu={hedgeAmountYu}
@@ -178,11 +180,11 @@ export default function DashboardPage() {
                         />
                     </div>
 
-                    <div className="min-h-0 lg:col-span-3">
+                    <div className="min-h-[300px] lg:col-span-3">
                         <SavingsPortfolio latest={latest} hedges={hedges} loading={loading} title="SAVINGS PORTFOLIO" />
                     </div>
 
-                    <div className="min-h-0 lg:col-span-6">
+                    <div className="min-h-[300px] lg:col-span-6">
                         <ExecutionConsole
                             aiLogs={aiLogs}
                             hedges={hedges}
@@ -194,7 +196,7 @@ export default function DashboardPage() {
                         />
                     </div>
 
-                    <div className="min-h-0 lg:col-span-3">
+                    <div className="min-h-[300px] min-w-0 lg:col-span-3">
                         <YieldRiskGauge
                             latest={latest}
                             aiLogs={aiLogs}
