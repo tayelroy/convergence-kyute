@@ -1,0 +1,5 @@
+staging-settings:
+  user-workflow:
+    workflow-name: "minimal-cre-check"
+  workflow-artifacts:
+    workflow-path: "./main.ts"

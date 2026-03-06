@@ -20,6 +20,7 @@ import {
 } from "./hedge-policy.js";
 import { buildHedgeExecutionPlan } from "./hedge-execution-plan.js";
 import { fetchBorosImpliedAprQuote } from "./boros.js";
+import { resolveFreshOracleTimestamp } from "./oracle-timestamp.js";
 import { resolveUserHedgeMode } from "./strategy-config.js";
 import { readWalletBridgeRecord, resolveWalletUserId } from "./wallet-bridge.js";
 
@@ -472,14 +473,15 @@ const fetchHyperliquidFundingBp = async (
     Date.now(),
   );
   const annualizedFundingBp = Math.round(averageFundingRate * 24 * 365 * 10_000);
+  const oracleTimestamp = resolveFreshOracleTimestamp(latestTimestampMs);
   console.log(
-    `[direct-hedge] funding computed coin=${coin} avgRatePerHour=${averageFundingRate} annualizedBp=${annualizedFundingBp} latestTsSec=${Math.floor(latestTimestampMs / 1000)}`,
+    `[direct-hedge] funding computed coin=${coin} avgRatePerHour=${averageFundingRate} annualizedBp=${annualizedFundingBp} latestTsSec=${Math.floor(latestTimestampMs / 1000)} oracleTs=${oracleTimestamp.oracleTimestampSec} source=${oracleTimestamp.source}`,
   );
 
   return {
     averageFundingBp: annualizedFundingBp,
     observedPoints: points.length,
-    oracleTimestampSec: BigInt(Math.floor(latestTimestampMs / 1000)),
+    oracleTimestampSec: oracleTimestamp.oracleTimestampSec,
   };
 };
 
@@ -682,6 +684,7 @@ async function main() {
   let hlSide: PositionSide = storedIsLong ? "long" : "short";
   let targetSource = "unresolved";
   const envFundingOverride = parseOptionalSignedNumberEnv("DEMO_HL_FUNDING_BP");
+  const hasFundingOverride = envFundingOverride !== null;
   let averageFundingBp = envFundingOverride ?? 0;
   const borosQuote = await fetchBorosImpliedAprQuote(hlCoinDefault, {
     marketAddress: process.env.BOROS_MARKET_ADDRESS,
@@ -695,10 +698,10 @@ async function main() {
   );
   if (hlLookupAddress) {
     const snapshot = await fetchHyperliquidPositionSnapshot(hlLookupAddress, hlPositionUrl, hlCoinDefault);
-    const funding = averageFundingBp === 0
+    const funding = !hasFundingOverride
       ? await fetchHyperliquidFundingBp(hlFundingUrl, hlCoinDefault, fundingWindowHours)
       : null;
-    if (envFundingOverride !== null) {
+    if (hasFundingOverride) {
       console.log(`[direct-hedge] using DEMO_HL_FUNDING_BP override=${envFundingOverride}; skipping HL funding fetch`);
     }
     hlSize = snapshot.hlSize;
@@ -745,7 +748,7 @@ async function main() {
   }
 
   // If we didn't fetch funding from HL (no address) and no env override, fetch public funding to avoid silent zero.
-  if (averageFundingBp === 0 && envFundingOverride === null) {
+  if (averageFundingBp === 0 && !hasFundingOverride) {
     try {
       const funding = await fetchHyperliquidFundingBp(hlFundingUrl, hlCoinDefault, fundingWindowHours);
       averageFundingBp = funding.averageFundingBp;
@@ -764,6 +767,10 @@ async function main() {
     userId,
     walletAddress: hlLookupAddress ?? (mappedUser.toLowerCase() === ZERO_ADDRESS.toLowerCase() ? null : mappedUser),
     vaultAddress,
+    marketKey: `${hlCoinDefault.toLowerCase()}:hlperp:${borosMarketAddress.toLowerCase()}`,
+    assetSymbol: hlCoinDefault,
+    venue: "HlPerp",
+    borosMarketAddress,
     fallbackMode: configuredHedgeMode,
     logger: (message) => console.log(`[direct-hedge] ${message}`),
   });

@@ -1,7 +1,11 @@
 import fs from "node:fs";
 import path from "node:path";
-import { createClient } from "@supabase/supabase-js";
 import { isAddress, type Address } from "viem";
+import {
+  resolveSupabaseRestConfig,
+  type SupabaseRestFetch,
+  selectSupabaseRows,
+} from "./supabase-rest.js";
 
 export type WalletBridgeRecord = {
   userId: string | number;
@@ -14,6 +18,13 @@ export type WalletBridgeRecord = {
   issuedAt: string;
   expiresAt: string;
   updatedAt: string;
+};
+
+type SupabaseResolverOptions = {
+  supabaseUrl?: string;
+  supabaseKey?: string;
+  disableFileFallback?: boolean;
+  supabaseFetch?: SupabaseRestFetch;
 };
 
 type WalletBridgeStore = {
@@ -118,50 +129,44 @@ const readFileRecord = (params: {
   return matches[0] ?? null;
 };
 
-const resolveSupabaseClient = () => {
-  const supabaseUrl =
-    process.env.CRE_SUPABASE_URL ??
-    process.env.SUPABASE_URL ??
-    process.env.NEXT_PUBLIC_SUPABASE_URL;
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ??
-    process.env.CRE_SUPABASE_KEY ??
-    process.env.SUPABASE_KEY ??
-    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
-
-  if (!supabaseUrl || !supabaseKey) {
-    return null;
-  }
-
-  return createClient(supabaseUrl, supabaseKey);
-};
-
 export const readWalletBridgeRecord = async (params: {
   userId?: bigint;
   walletAddress?: Address;
   vaultAddress?: Address;
+  supabaseUrl?: string;
+  supabaseKey?: string;
+  disableFileFallback?: boolean;
+  supabaseFetch?: SupabaseRestFetch;
 }): Promise<WalletBridgeRecord | null> => {
-  const supabase = resolveSupabaseClient();
-  if (!supabase) {
-    return readFileRecord(params);
+  const supabaseConfig = resolveSupabaseRestConfig({
+    supabaseUrl: params.supabaseUrl,
+    supabaseKey: params.supabaseKey,
+  });
+  if (!supabaseConfig) {
+    return params.disableFileFallback ? null : readFileRecord(params);
   }
 
-  let query = supabase
-    .from(USER_WALLET_TABLE)
-    .select("user_id,wallet_address,vault_address,chain_id,testnet,issued_at,expires_at,signature,updated_at")
-    .order("updated_at", { ascending: false })
-    .limit(25);
+  const query: Record<string, string> = {
+    select: "user_id,wallet_address,vault_address,chain_id,testnet,issued_at,expires_at,signature,updated_at",
+    order: "updated_at.desc",
+    limit: "25",
+  };
+  if (params.userId) query.user_id = `eq.${Number(params.userId)}`;
+  if (params.walletAddress) query.wallet_address = `eq.${params.walletAddress.toLowerCase()}`;
 
-  if (params.userId) {
-    query = query.eq("user_id", Number(params.userId));
-  }
-  if (params.walletAddress) {
-    query = query.eq("wallet_address", params.walletAddress.toLowerCase());
-  }
-  const { data, error } = await query;
-  if (error) {
-    console.error(`[wallet-bridge] Supabase read failed: ${error.message}`);
-    return readFileRecord(params);
+  let data: WalletBridgeDbRow[];
+  try {
+    data = await selectSupabaseRows<WalletBridgeDbRow>({
+      table: USER_WALLET_TABLE,
+      query,
+      supabaseUrl: supabaseConfig.supabaseUrl,
+      supabaseKey: supabaseConfig.supabaseKey,
+      fetcher: params.supabaseFetch,
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error(`[wallet-bridge] Supabase read failed: ${message}`);
+    return params.disableFileFallback ? null : readFileRecord(params);
   }
 
   const records = (data ?? [])
@@ -186,16 +191,24 @@ export const readWalletBridgeRecord = async (params: {
       return toMillis(right.updatedAt) - toMillis(left.updatedAt);
     });
 
-  return records[0] ?? readFileRecord(params);
+  return records[0] ?? (params.disableFileFallback ? null : readFileRecord(params));
 };
 
 export const resolveWalletUserId = async (params: {
   walletAddress: Address;
   vaultAddress?: Address;
+  supabaseUrl?: string;
+  supabaseKey?: string;
+  disableFileFallback?: boolean;
+  supabaseFetch?: SupabaseRestFetch;
 }): Promise<bigint | null> => {
   const record = await readWalletBridgeRecord({
     walletAddress: params.walletAddress,
     vaultAddress: params.vaultAddress,
+    supabaseUrl: params.supabaseUrl,
+    supabaseKey: params.supabaseKey,
+    disableFileFallback: params.disableFileFallback,
+    supabaseFetch: params.supabaseFetch,
   });
   if (!record) return null;
   return BigInt(record.userId);

@@ -15,6 +15,9 @@ import {
   type HedgeMode,
   type PositionSide,
 } from "../hedge-policy.js";
+import { fetchBorosImpliedAprQuote } from "../boros.js";
+import { resolveFreshOracleTimestamp } from "../oracle-timestamp.js";
+import { resolveUserHedgeMode } from "../strategy-config.js";
 
 const PAIR = "ETHUSDC";
 const HL_COIN = "ETH";
@@ -107,8 +110,11 @@ type WorkflowRunnerConfig = {
   hlAddress: Address;
   hlTestnet?: boolean;
   hlBaseUrl?: string;
+  hlFundingTestnet?: boolean;
+  hlFundingBaseUrl?: string;
+  hlPositionTestnet?: boolean;
+  hlPositionBaseUrl?: string;
   borosMarketAddress?: Address;
-  subgraphUrl: string;
   rpcUrl: string;
   callbackPrivateKey: Hex;
   thresholdBp?: number;
@@ -143,6 +149,26 @@ type WorkflowRunnerResult = {
 };
 
 type Logger = (message: string) => void;
+
+const resolveHlUrl = (
+  config: WorkflowRunnerConfig,
+  kind: "funding" | "position",
+): string => {
+  if (kind === "funding") {
+    if (config.hlFundingBaseUrl) return config.hlFundingBaseUrl;
+    if (typeof config.hlFundingTestnet === "boolean") {
+      return config.hlFundingTestnet ? HL_TESTNET_URL : HL_MAINNET_URL;
+    }
+  } else {
+    if (config.hlPositionBaseUrl) return config.hlPositionBaseUrl;
+    if (typeof config.hlPositionTestnet === "boolean") {
+      return config.hlPositionTestnet ? HL_TESTNET_URL : HL_MAINNET_URL;
+    }
+  }
+
+  if (config.hlBaseUrl) return config.hlBaseUrl;
+  return config.hlTestnet ? HL_TESTNET_URL : HL_MAINNET_URL;
+};
 
 const postJson = async <T>(url: string, body: unknown): Promise<T> => {
   const response = await fetch(url, {
@@ -237,14 +263,12 @@ const fetchHyperliquidFundingHistoryApr = async (
   }
 };
 
-const resolveOracleTimestamp = (points: HyperliquidFundingPoint[]): bigint => {
-  if (points.length === 0) return BigInt(Math.floor(Date.now() / 1000));
-
-  let latestMs = points[0].timestamp;
+const resolveOracleTimestamp = (points: HyperliquidFundingPoint[]) => {
+  let latestMs: number | null = null;
   for (const point of points) {
-    if (point.timestamp > latestMs) latestMs = point.timestamp;
+    if (latestMs == null || point.timestamp > latestMs) latestMs = point.timestamp;
   }
-  return BigInt(Math.floor(latestMs / 1000));
+  return resolveFreshOracleTimestamp(latestMs);
 };
 
 const fetchHyperliquidPositionSnapshot = async (
@@ -283,55 +307,6 @@ const fetchHyperliquidPositionSnapshot = async (
   const hedgeNotional = hlSize;
 
   return { positionSide, hlSize, markPrice, hedgeNotional };
-};
-
-const fetchMarketAprField = async (subgraphUrl: string): Promise<string> => {
-  const introspection = await postJson<{
-    data?: { __type?: { fields?: Array<{ name: string }> } };
-  }>(subgraphUrl, {
-    query: "query IntrospectMarketFields { __type(name: \"Market\") { fields { name } } }",
-  });
-
-  const names = new Set((introspection.data?.__type?.fields ?? []).map((field) => field.name));
-  const candidates = ["impliedApr", "impliedApy", "fixedApr", "fixedApy"];
-  const selected = candidates.find((field) => names.has(field));
-
-  if (!selected) {
-    throw new Error("Unable to resolve Boros APR field from subgraph schema");
-  }
-
-  return selected;
-};
-
-const fetchBorosImpliedApr = async (
-  subgraphUrl: string,
-  marketAddress?: Address,
-): Promise<number> => {
-  const aprField = await fetchMarketAprField(subgraphUrl);
-  const marketId = marketAddress?.toLowerCase();
-
-  const query = marketId
-    ? `query MarketById($id: String!) { market(id: $id) { ${aprField} } }`
-    : `query LatestMarket { markets(first: 1) { ${aprField} } }`;
-
-  const variables = marketId ? { id: marketId } : undefined;
-  const response = await postJson<{
-    data?: {
-      market?: Record<string, unknown> | null;
-      markets?: Array<Record<string, unknown>>;
-    };
-  }>(subgraphUrl, { query, variables });
-
-  const value = marketId
-    ? response.data?.market?.[aprField]
-    : response.data?.markets?.[0]?.[aprField];
-
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) {
-    throw new Error("Subgraph returned non-numeric Boros APR");
-  }
-
-  return normalizeApr(parsed);
 };
 
 const buildProofPayload = (input: {
@@ -389,15 +364,19 @@ export const runKyuteWorkflowCycle = async (
   const entryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
   const exitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
   const windowHours = config.windowHours ?? WINDOW_HOURS;
-  const baseUrl = config.hlBaseUrl ?? (config.hlTestnet ? HL_TESTNET_URL : HL_MAINNET_URL);
-  const hedgeMode = config.hedgeMode ?? "adverse_only";
+  const hlFundingUrl = resolveHlUrl(config, "funding");
+  const hlPositionUrl = resolveHlUrl(config, "position");
+  const configuredHedgeMode = config.hedgeMode ?? "adverse_only";
   const borosOiFeeBp = config.borosOiFeeBp ?? DEFAULT_BOROS_OI_FEE_BP;
 
-  const funding = await fetchHyperliquidFundingHistoryApr(HL_COIN, baseUrl, windowHours);
-  const position = await fetchHyperliquidPositionSnapshot(config.hlAddress, baseUrl);
-  const borosApr = await fetchBorosImpliedApr(config.subgraphUrl, config.borosMarketAddress);
+  const funding = await fetchHyperliquidFundingHistoryApr(HL_COIN, hlFundingUrl, windowHours);
+  const position = await fetchHyperliquidPositionSnapshot(config.hlAddress, hlPositionUrl);
+  const borosQuote = await fetchBorosImpliedAprQuote(HL_COIN, {
+    marketAddress: config.borosMarketAddress,
+  });
   const hlAprBp = toAprBp(funding.apr);
-  const borosAprBp = toAprBp(borosApr);
+  const borosApr = borosQuote.aprDecimal;
+  const borosAprBp = borosQuote.aprBp;
   const confidenceBp = 10_000;   // 100% confidence
   const transport = http(config.rpcUrl);
   const publicClient = createPublicClient({ chain: undefined, transport });
@@ -416,6 +395,22 @@ export const runKyuteWorkflowCycle = async (
         args: [mappedUser],
       } as any)) as readonly [Address, boolean, bigint, bigint, boolean, Address, bigint, bigint, bigint, boolean, boolean])
     : null;
+  const strategyMode = await resolveUserHedgeMode({
+    userId: config.userId,
+    walletAddress: config.hlAddress,
+    vaultAddress: config.vaultAddress,
+    marketKey: `${HL_COIN.toLowerCase()}:hlperp:${String(config.borosMarketAddress ?? "").toLowerCase() || "default"}`,
+    assetSymbol: HL_COIN,
+    venue: "HlPerp",
+    borosMarketAddress: config.borosMarketAddress,
+    fallbackMode: configuredHedgeMode,
+    logger: (message) => log(`[workflow-runner] ${message}`),
+  });
+  const hedgeMode = strategyMode.mode;
+  log(`[workflow-runner] using strategy mode ${hedgeMode} from ${strategyMode.source}`);
+  if (strategyMode.warning) {
+    log(`[workflow-runner] strategy mode warning: ${strategyMode.warning}`);
+  }
 
   const decision = computeHedgePolicy({
     positionSide: position.positionSide,
@@ -461,6 +456,15 @@ export const runKyuteWorkflowCycle = async (
   const proofHash = keccak256(toBytes(`${proofDigest}:${proofSignature}`));
   const oracleTimestamp = resolveOracleTimestamp(funding.points);
 
+  if (hlFundingUrl !== hlPositionUrl) {
+    log(`[workflow-runner] using separate HL endpoints fundingUrl=${hlFundingUrl} positionUrl=${hlPositionUrl}`);
+  }
+  if (oracleTimestamp.source !== "latest_point") {
+    log(
+      `[workflow-runner] oracle timestamp source=${oracleTimestamp.source} latestPointSec=${oracleTimestamp.latestPointSec ?? "none"} usingCurrentSec=${oracleTimestamp.oracleTimestampSec}`,
+    );
+  }
+
   log(
     `Decision for ${PAIR}: funding1h=${hlAprBp}bp, exposure=${decision.exposure}, side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, hedgeNotional=${position.hedgeNotional.toFixed(6)}, borosImpliedAprBp=${borosAprBp}, edge=${decision.edgeBp}bp, targetHedgeIsLong=${targetHedgeIsLong}, confidence=${confidenceBp}bp -> shouldHedge=${shouldHedge}`,
   );
@@ -486,14 +490,19 @@ export const runKyuteWorkflowCycle = async (
       throw new Error(`userId=${config.userId} is not mapped in vault ${config.vaultAddress}`);
     }
 
-    const targetHedgeNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
+    const livePositionNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
+    const syncTargetHedgeNotionalWei = shouldHedge ? livePositionNotionalWei : 0n;
+    const leverageForSync = positionState[3] > 0n ? positionState[3] : 1n;
     const syncNeeded =
-      Boolean(positionState[0] !== "0x0000000000000000000000000000000000000000") &&
+      (positionState[0] === "0x0000000000000000000000000000000000000000" && livePositionNotionalWei > 0n) ||
       (
-        Boolean(positionState[1]) !== (position.positionSide === "long") ||
-        positionState[2] !== targetHedgeNotionalWei ||
-        positionState[7] !== (shouldHedge ? targetHedgeNotionalWei : 0n) ||
-        Boolean(positionState[10]) !== targetHedgeIsLong
+        positionState[0] !== "0x0000000000000000000000000000000000000000" &&
+        (
+          Boolean(positionState[1]) !== (position.positionSide === "long") ||
+          positionState[2] !== livePositionNotionalWei ||
+          positionState[7] !== syncTargetHedgeNotionalWei ||
+          Boolean(positionState[10]) !== targetHedgeIsLong
+        )
       );
     if (syncNeeded) {
       const syncData = encodeFunctionData({
@@ -502,11 +511,11 @@ export const runKyuteWorkflowCycle = async (
         args: [
           config.userId,
           position.positionSide === "long",
-          targetHedgeNotionalWei,
-          positionState[3],
-          shouldHedge ? targetHedgeNotionalWei : 0n,
+          livePositionNotionalWei,
+          leverageForSync,
+          syncTargetHedgeNotionalWei,
           targetHedgeIsLong,
-          oracleTimestamp,
+          oracleTimestamp.oracleTimestampSec,
         ],
       });
       const syncTxHash = await walletClient.sendTransaction({
@@ -529,8 +538,8 @@ export const runKyuteWorkflowCycle = async (
         BigInt(predictedAprBp),
         BigInt(confidenceBp),
         BigInt(contractBorosAprBp),
-        shouldHedge ? targetHedgeNotionalWei : 0n,
-        oracleTimestamp,
+        syncTargetHedgeNotionalWei,
+        oracleTimestamp.oracleTimestampSec,
         proofHash,
       ],
     });

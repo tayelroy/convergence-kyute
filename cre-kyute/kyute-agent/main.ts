@@ -27,7 +27,14 @@ import {
   type HedgeMode,
   type PositionSide,
 } from "../hedge-policy.js";
-import { fetchBorosImpliedAprQuote } from "../boros.js";
+import {
+  DEFAULT_BOROS_CORE_API_BASE_URL,
+  DEFAULT_BOROS_MARKET_ID,
+  fetchBorosAprSnapshot,
+} from "../boros-core-api.js";
+import { resolveFreshOracleTimestamp } from "../oracle-timestamp.js";
+import { fetchTextViaRequester, type SupabaseRestFetch } from "../supabase-rest.js";
+import { resolveUserHedgeMode } from "../strategy-config.js";
 import { readWalletBridgeRecord, resolveWalletUserId } from "../wallet-bridge.js";
 
 type PerpSide = "buy" | "sell";
@@ -330,6 +337,7 @@ type Config = {
   vaultAddress: string;
   userId?: number;
   yuToken?: string;
+  supabaseUrl?: string;
   hlAddress?: string;
   hlTestnet?: boolean;
   hlBaseUrl?: string;
@@ -343,6 +351,7 @@ type Config = {
   hedgeMode?: HedgeMode;
   hedgeNotionalUseMarkPrice?: boolean;
   borosOiFeeBp?: number;
+  borosMarketId?: number;
   borosMarketAddress?: string;
   borosCoreApiUrl?: string;
   windowHours?: number;
@@ -469,7 +478,24 @@ const resolveUseMarkPrice = (config: Config): boolean => {
   if (typeof config.hedgeNotionalUseMarkPrice === "boolean") {
     return config.hedgeNotionalUseMarkPrice;
   }
-  return String(process.env.DEMO_HEDGE_NOTIONAL_USE_MARK_PRICE ?? "").trim().toLowerCase() === "true";
+  return false;
+};
+
+const readOptionalSecret = (runtime: Runtime<Config>, id: string): string | null => {
+  try {
+    const secret = runtime.getSecret({ id }).result();
+    const value = secret.value?.trim();
+    return value && value.length > 0 ? value : null;
+  } catch {
+    return null;
+  }
+};
+
+const createSupabaseRestFetch = (http: HTTPClient, runtime: Runtime<Config>): SupabaseRestFetch => {
+  return async (url, headers) =>
+    http
+      .sendRequest(runtime, fetchTextViaRequester, consensusIdenticalAggregation())(url, headers)
+      .result();
 };
 
 const resolveHyperliquidWalletAddress = async (params: {
@@ -477,10 +503,17 @@ const resolveHyperliquidWalletAddress = async (params: {
   userId: bigint;
   vaultAddress?: Address;
   mappedUser: Address;
+  supabaseUrl?: string;
+  supabaseKey?: string;
+  supabaseFetch?: SupabaseRestFetch;
 }): Promise<{ address: Address; source: string }> => {
   const bridged = await readWalletBridgeRecord({
     userId: params.userId,
     vaultAddress: params.vaultAddress,
+    supabaseUrl: params.supabaseUrl,
+    supabaseKey: params.supabaseKey,
+    disableFileFallback: true,
+    supabaseFetch: params.supabaseFetch,
   });
   if (bridged) {
     return { address: bridged.walletAddress, source: "frontend_bridge" };
@@ -497,10 +530,21 @@ const resolveHyperliquidWalletAddress = async (params: {
   throw new Error("Missing Hyperliquid wallet address in config, bridge registration, and vault mapping");
 };
 
-const resolveAgentUserId = async (config: Config, vaultAddress?: Address): Promise<bigint> => {
+const resolveAgentUserId = async (
+  config: Config,
+  vaultAddress: Address | undefined,
+  supabaseUrl?: string,
+  supabaseKey?: string,
+  supabaseFetch?: SupabaseRestFetch,
+): Promise<bigint> => {
   if (config.hlAddress && /^0x[0-9a-fA-F]{40}$/.test(config.hlAddress)) {
     const bridgedUserId = await resolveWalletUserId({
       walletAddress: config.hlAddress as Address,
+      vaultAddress,
+      supabaseUrl,
+      supabaseKey,
+      disableFileFallback: true,
+      supabaseFetch,
     });
     if (bridgedUserId !== null) {
       return bridgedUserId;
@@ -511,12 +555,23 @@ const resolveAgentUserId = async (config: Config, vaultAddress?: Address): Promi
     return BigInt(Math.floor(config.userId));
   }
 
-  const latestBridgeRecord = await readWalletBridgeRecord({ vaultAddress });
+  const latestBridgeRecord = await readWalletBridgeRecord({
+    vaultAddress,
+    supabaseUrl,
+    supabaseKey,
+    disableFileFallback: true,
+    supabaseFetch,
+  });
   if (latestBridgeRecord) {
     return BigInt(latestBridgeRecord.userId);
   }
 
-  const anyBridgeRecord = await readWalletBridgeRecord({});
+  const anyBridgeRecord = await readWalletBridgeRecord({
+    supabaseUrl,
+    supabaseKey,
+    disableFileFallback: true,
+    supabaseFetch,
+  });
   if (anyBridgeRecord) {
     return BigInt(anyBridgeRecord.userId);
   }
@@ -669,10 +724,13 @@ const fetchHlPositionSnapshot = (
 const onCronTrigger = async (runtime: Runtime<Config>) => {
   const http = new HTTPClient();
   const config = runtime.config;
+  const supabaseUrl = config.supabaseUrl?.trim() || undefined;
+  const supabaseKey = readOptionalSecret(runtime, "SUPABASE_KEY") ?? undefined;
+  const supabaseFetch = createSupabaseRestFetch(http, runtime);
   const entryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
   const exitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
   const windowHours = config.windowHours ?? WINDOW_HOURS;
-  const hedgeMode = config.hedgeMode ?? "adverse_only";
+  const configuredHedgeMode = config.hedgeMode ?? "adverse_only";
   const borosOiFeeBp = config.borosOiFeeBp ?? DEFAULT_BOROS_OI_FEE_BP;
   const useMarkPrice = resolveUseMarkPrice(config);
   const hlFundingUrl = resolveHlUrl(config, "funding");
@@ -690,7 +748,13 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
   const hasVaultAddress =
     /^0x[0-9a-fA-F]{40}$/.test(vaultAddress) &&
     vaultAddress !== "0x0000000000000000000000000000000000000000";
-  const userId = await resolveAgentUserId(config, hasVaultAddress ? vaultAddress : undefined);
+  const userId = await resolveAgentUserId(
+    config,
+    hasVaultAddress ? vaultAddress : undefined,
+    supabaseUrl,
+    supabaseKey,
+    supabaseFetch,
+  );
   let mappedUser = hasVaultAddress
     ? ((await publicClient.readContract({
         address: vaultAddress,
@@ -714,6 +778,9 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
     userId,
     vaultAddress: hasVaultAddress ? vaultAddress : undefined,
     mappedUser,
+    supabaseUrl,
+    supabaseKey,
+    supabaseFetch,
   });
   if (
     hasVaultAddress &&
@@ -755,21 +822,55 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
   if (hlFundingUrl !== hlPositionUrl) {
     runtime.log(`Using separate HL endpoints fundingUrl=${hlFundingUrl} positionUrl=${hlPositionUrl}`);
   }
+  const strategyMode = await resolveUserHedgeMode({
+    userId,
+    walletAddress: hlWallet.address,
+    vaultAddress: hasVaultAddress ? vaultAddress : undefined,
+    marketKey: `${HL_COIN.toLowerCase()}:hlperp:${String(config.borosMarketAddress ?? "").toLowerCase() || "default"}`,
+    assetSymbol: HL_COIN,
+    venue: "HlPerp",
+    borosMarketAddress: config.borosMarketAddress,
+    fallbackMode: configuredHedgeMode,
+    logger: (message) => runtime.log(message),
+    supabaseUrl,
+    supabaseKey,
+    supabaseFetch,
+  });
+  const hedgeMode = strategyMode.mode;
+  runtime.log(`Using strategy mode ${hedgeMode} from ${strategyMode.source}`);
+  if (strategyMode.warning) {
+    runtime.log(`Strategy mode warning: ${strategyMode.warning}`);
+  }
+  const borosMarketId = Number.isFinite(config.borosMarketId)
+    ? Math.max(1, Math.floor(config.borosMarketId as number))
+    : DEFAULT_BOROS_MARKET_ID;
+  const borosCoreApiBaseUrl =
+    config.borosCoreApiUrl?.trim() || DEFAULT_BOROS_CORE_API_BASE_URL;
   const [funding, borosQuote, position] = await Promise.all([
     http
       .sendRequest(runtime, fetchAverageFundingBp, consensusIdenticalAggregation())(hlFundingUrl, windowHours)
       .result(),
-    fetchBorosImpliedAprQuote(HL_COIN, {
-      marketAddress: config.borosMarketAddress,
-      coreApiUrl: config.borosCoreApiUrl,
-    }),
+    http
+      .sendRequest(runtime, fetchBorosAprSnapshot, consensusIdenticalAggregation())(
+        borosCoreApiBaseUrl,
+        borosMarketId,
+      )
+      .result(),
     http
       .sendRequest(runtime, fetchHlPositionSnapshot, consensusIdenticalAggregation())(hlPositionUrl, hlWallet.address, useMarkPrice)
       .result(),
   ]);
-  const oracleTimestamp = BigInt(Math.floor(funding.latestFundingTimestampMs / 1000));
-  const borosAprBp = borosQuote.aprBp;
-  const borosApr = borosQuote.aprDecimal;
+  const oracleTimestamp = resolveFreshOracleTimestamp(funding.latestFundingTimestampMs);
+  if (borosQuote.apr === null) {
+    throw new Error(`Boros APR missing for marketId=${borosQuote.marketId} field=${borosQuote.field}`);
+  }
+  const borosApr = borosQuote.apr;
+  const borosAprBp = Math.round(borosApr * 10_000);
+  if (oracleTimestamp.source !== "latest_point") {
+    runtime.log(
+      `Oracle timestamp source=${oracleTimestamp.source} latestPointSec=${oracleTimestamp.latestPointSec ?? "none"} usingCurrentSec=${oracleTimestamp.oracleTimestampSec}`,
+    );
+  }
   const positionState = hasMappedUser
     ? ((await publicClient.readContract({
         address: vaultAddress,
@@ -800,7 +901,9 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
   const targetHedgeIsLong = decision.targetHedgeIsLong;
   const targetHedgeNotionalWei = shouldHedge ? livePositionNotionalWei : 0n;
 
-  runtime.log(`Boros APR: ${(borosApr * 100).toFixed(2)}% market=${borosQuote.marketAddress ?? "auto"}`);
+  runtime.log(
+    `Boros APR: ${(borosApr * 100).toFixed(2)}% marketId=${borosQuote.marketId} field=${borosQuote.field} midApr=${borosQuote.midApr ?? "null"} lastTradedApr=${borosQuote.lastTradedApr ?? "null"} floatingApr=${borosQuote.floatingApr ?? "null"} state=${borosQuote.state ?? "unknown"} market=${config.borosMarketAddress ?? "n/a"}`,
+  );
   runtime.log(`HL 1h avg funding (annualized): ${funding.averageFundingBp} bp`);
   runtime.log(
     `HL wallet=${hlWallet.address} source=${hlWallet.source} side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, mark=${position.markPrice.toFixed(4)}, ` +
@@ -860,7 +963,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       BigInt(contractBorosAprBp),
       targetHedgeIsLong ? 1 : 2,
       livePositionNotionalWei,
-      oracleTimestamp,
+      oracleTimestamp.oracleTimestampSec,
       proofHash
     ],
   )
@@ -908,7 +1011,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
               leverageForSync,
               targetHedgeNotionalWei,
               targetHedgeIsLong,
-              oracleTimestamp,
+              oracleTimestamp.oracleTimestampSec,
             ],
           });
           const syncTxHash = await directWalletClient.sendTransaction({
@@ -935,7 +1038,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
             BigInt(confidenceBp),
             BigInt(contractBorosAprBp),
             targetHedgeNotionalWei,
-            oracleTimestamp,
+            oracleTimestamp.oracleTimestampSec,
             proofHash,
           ],
         });
@@ -995,6 +1098,8 @@ const initWorkflow = (config: Config) => {
 };
 
 export async function main() {
-  const runner = await Runner.newRunner<Config>();
+  const runner = await Runner.newRunner<Config>({
+    configParser: (raw) => JSON.parse(new TextDecoder().decode(raw)) as Config,
+  });
   await runner.run(initWorkflow);
 }
