@@ -10,71 +10,119 @@ import {
   Waves,
 } from "lucide-react";
 import { useActiveAccount } from "thirdweb/react";
+import { DemoFaucetPanel } from "@/components/strategy/DemoFaucetPanel";
 import { StrategyCard } from "@/components/strategy/StrategyCard";
 import { VaultDepositPanel } from "@/components/strategy/VaultDepositPanel";
 import { Button } from "@/components/ui/button";
 import { kyuteVaultChainLabel } from "@/lib/chains";
 import { formatAddress, getKyuteVaultAddress } from "@/lib/kyute-vault";
-
-type StrategyId = "default_hedge" | "short_perp_fixed_lock" | "ai_custom";
-
-type StrategyPreferences = {
-  enabled: StrategyId[];
-  aiPrompt: string;
-  codexTokens: number;
-};
-
-const STORAGE_KEY = "kyute_strategy_preferences_v1";
-
-const DEFAULT_PREFERENCES: StrategyPreferences = {
-  enabled: ["default_hedge"],
-  aiPrompt:
-    "Find a funding-rate strategy that keeps Boros exposure collateralized by my vault deposit, limits directional beta, and makes the hedge leg explicit.",
-  codexTokens: 8000,
-};
+import {
+  DEFAULT_STRATEGY_PREFERENCES,
+  STRATEGY_STORAGE_KEY,
+  normalizeStrategyPreferences,
+  type StrategyId,
+  type StrategyPreferences,
+} from "@/lib/strategy-preferences";
 
 const TOKEN_OPTIONS = [4000, 8000, 16000, 32000];
 
 const STRATEGY_TITLES: Record<StrategyId, string> = {
   default_hedge: "Default hedge",
-  short_perp_fixed_lock: "Receive-floating lock",
+  dynamic_regime_hedge: "Dynamic regime hedge",
+  short_perp_fixed_lock: "Dynamic regime hedge",
   ai_custom: "Codex strategy lab",
 };
 
 export default function StrategyPage() {
   const account = useActiveAccount();
-  const [preferences, setPreferences] = useState<StrategyPreferences>(DEFAULT_PREFERENCES);
+  const [preferences, setPreferences] = useState<StrategyPreferences>(() => {
+    if (typeof window === "undefined") {
+      return DEFAULT_STRATEGY_PREFERENCES;
+    }
+
+    try {
+      const raw = window.localStorage.getItem(STRATEGY_STORAGE_KEY);
+      if (!raw) return DEFAULT_STRATEGY_PREFERENCES;
+      return normalizeStrategyPreferences(JSON.parse(raw) as Partial<StrategyPreferences>);
+    } catch {
+      return DEFAULT_STRATEGY_PREFERENCES;
+    }
+  });
   const [copied, setCopied] = useState(false);
+  const [remoteLoaded, setRemoteLoaded] = useState(false);
   const vaultAddress = getKyuteVaultAddress();
 
   useEffect(() => {
-    try {
-      const raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) return;
-      const parsed = JSON.parse(raw) as Partial<StrategyPreferences>;
-      setPreferences({
-        enabled: Array.isArray(parsed.enabled)
-          ? parsed.enabled.filter((value): value is StrategyId =>
-              value === "default_hedge" || value === "short_perp_fixed_lock" || value === "ai_custom",
-            )
-          : DEFAULT_PREFERENCES.enabled,
-        aiPrompt:
-          typeof parsed.aiPrompt === "string" && parsed.aiPrompt.trim().length > 0
-            ? parsed.aiPrompt
-            : DEFAULT_PREFERENCES.aiPrompt,
-        codexTokens:
-          typeof parsed.codexTokens === "number" && Number.isFinite(parsed.codexTokens)
-            ? parsed.codexTokens
-            : DEFAULT_PREFERENCES.codexTokens,
-      });
-    } catch {
-      setPreferences(DEFAULT_PREFERENCES);
-    }
-  }, []);
+    window.localStorage.setItem(STRATEGY_STORAGE_KEY, JSON.stringify(preferences));
+  }, [preferences]);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(preferences));
-  }, [preferences]);
+    let cancelled = false;
+
+    if (!account?.address) {
+      setRemoteLoaded(true);
+      return () => {
+        cancelled = true;
+      };
+    }
+
+    setRemoteLoaded(false);
+    void (async () => {
+      try {
+        const params = new URLSearchParams({
+          walletAddress: account.address,
+        });
+        const response = await fetch(`/api/strategy-preferences?${params.toString()}`, {
+          method: "GET",
+          cache: "no-store",
+        });
+        const payload = (await response.json()) as {
+          ok: boolean;
+          preferences?: Partial<StrategyPreferences> | null;
+        };
+
+        if (!cancelled && response.ok && payload.ok && payload.preferences) {
+          setPreferences(normalizeStrategyPreferences(payload.preferences));
+        }
+      } catch {
+        // Local storage remains the fallback source if the DB path is unavailable.
+      } finally {
+        if (!cancelled) {
+          setRemoteLoaded(true);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [account?.address]);
+
+  useEffect(() => {
+    if (!account?.address || !remoteLoaded) {
+      return;
+    }
+
+    const timeout = window.setTimeout(() => {
+      void fetch("/api/strategy-preferences", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          walletAddress: account.address,
+          vaultAddress: vaultAddress ?? null,
+          preferences,
+        }),
+      }).catch(() => {
+        // Local cache stays authoritative if the DB write fails.
+      });
+    }, 350);
+
+    return () => {
+      window.clearTimeout(timeout);
+    };
+  }, [account?.address, preferences, remoteLoaded, vaultAddress]);
 
   const enabledStrategies = preferences.enabled;
   const activeTitles = enabledStrategies.map((id) => STRATEGY_TITLES[id]);
@@ -130,7 +178,7 @@ export default function StrategyPage() {
               Arm the strategies you want the vault to respect, then fund the Boros side with your own deposit.
             </h1>
             <p className="mt-4 max-w-2xl text-sm leading-7 text-neutral-300">
-              This page is the operator surface for strategy selection. The default hedge is already wired into the executor. The other cards let you stage the next routing modes without losing the decision trail.
+              This page is the operator surface for strategy selection. The default hedge and the receive-floating lock both persist to Supabase and now feed the live executor mode selection.
             </p>
             <div className="mt-6 grid gap-3 sm:grid-cols-3">
               <HeroMetric
@@ -163,8 +211,8 @@ export default function StrategyPage() {
                 accent="emerald"
               />
               <ExecutionNote
-                title="Receive-floating lock"
-                text="Frontend-configurable today. To execute it live, the backend needs the lock_fixed branch enabled instead of the current adverse_only mode."
+                title="Dynamic regime hedge"
+                text="Live today. When this strategy is armed, the executor resolves the saved Supabase preference and runs the lock_fixed mode. That means receive-floating conditions prefer the fixed-lock short-YU hedge, while pay-floating conditions still route to the standard long-YU hedge."
                 accent="cyan"
               />
               <ExecutionNote
@@ -191,22 +239,22 @@ export default function StrategyPage() {
               "Boros leg: long YU when the carry math beats fees and confidence gates.",
               "Net objective: blunt adverse floating payments and convert them into a fixed carry profile.",
             ]}
-            detail="This is the strategy your current direct hedge cycle already understands. Leaving it disabled here does not stop the backend by itself yet; this page is the operator configuration layer."
+            detail="This is the default live strategy. The saved preference now maps directly into the executor's adverse_only mode."
           />
 
           <StrategyCard
-            title="Receive-floating lock"
-            subtitle="For the case where the perp is short and receiving floating funding. Shorting YU on Boros turns that floating inflow into fixed yield by paying the matching floating leg and taking fixed."
+            title="Dynamic regime hedge"
+            subtitle="This is not a permanent hedge shape. It is a dynamic policy: use the fixed-lock short-YU hedge in receive-floating conditions, and otherwise fall back to the standard pay-floating hedge."
             accentClassName="bg-[linear-gradient(90deg,#38bdf8,#6366f1)]"
-            enabled={enabledStrategies.includes("short_perp_fixed_lock")}
-            readiness="config_only"
-            onToggle={() => toggleStrategy("short_perp_fixed_lock")}
+            enabled={enabledStrategies.includes("dynamic_regime_hedge")}
+            readiness="live"
+            onToggle={() => toggleStrategy("dynamic_regime_hedge")}
             payoffLines={[
-              "Perp leg: short perp, receive floating funding.",
-              "Boros leg: short YU, receive fixed and pay floating.",
-              "Net objective: neutralize floating variability and lock the spread into fixed carry.",
+              "Pay-floating regime: route to the standard long-YU hedge.",
+              "Receive-floating regime: short YU, receive fixed and pay floating.",
+              "Net objective: adapt the Boros leg to the current funding regime instead of hard-locking one hedge shape.",
             ]}
-            detail="This is the mirror-image carry lock. It matches the lock_fixed branch conceptually, but your current executor still needs that mode wired through before this card can directly drive Boros actions."
+            detail="The saved selection maps to the executor's lock_fixed mode. In practice that means the engine prefers the fixed-lock hedge when it is receiving floating, but it still uses the standard hedge when the regime flips back to paying floating."
           />
 
           <StrategyCard
@@ -281,6 +329,7 @@ export default function StrategyPage() {
         </div>
 
         <div className="space-y-6">
+          <DemoFaucetPanel />
           <VaultDepositPanel />
 
           <section className="rounded-[30px] border border-white/8 bg-[linear-gradient(180deg,#0d1015,#090b0f)] p-5">
@@ -311,7 +360,7 @@ export default function StrategyPage() {
                 What this page controls
               </div>
               <p className="mt-3 text-sm leading-6 text-neutral-300">
-                Today this page gives you a clean operator layer: local strategy intent, Codex prompt budgeting, and the actual vault deposit rail. The backend execution policy still needs to read these selections before they become hard controls.
+                Today this page gives you live strategy persistence, Codex prompt budgeting, and the vault deposit rail. Executor runs now read the saved strategy record from Supabase before evaluating hedge policy.
               </p>
             </div>
           </section>

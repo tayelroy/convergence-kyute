@@ -17,7 +17,7 @@ type StrategyCardProps = {
 };
 
 const readinessLabel: Record<StrategyCardProps["readiness"], string> = {
-  live: "Live executor path",
+  live: "Live now",
   config_only: "UI config only",
   draft: "Draft prompt only",
 };
