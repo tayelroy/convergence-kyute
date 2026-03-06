@@ -1,13 +1,15 @@
 "use client";
 
-import { useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { CheckCircle2, Coins, Wallet } from "lucide-react";
 import { getContract, prepareContractCall } from "thirdweb";
 import {
   TransactionButton,
   useActiveAccount,
+  useActiveWalletChain,
   useInvalidateContractQuery,
   useReadContract,
+  useSwitchActiveWalletChain,
 } from "thirdweb/react";
 import { formatUnits, parseUnits } from "viem";
 import { kyuteVaultChain, kyuteVaultChainLabel } from "@/lib/chains";
@@ -16,6 +18,7 @@ import { ERC20_ABI, formatAddress, getKyuteVaultAddress, VAULT_ABI } from "@/lib
 import { cn } from "@/lib/utils";
 
 const UNRESOLVED_ADDRESS = "0x0000000000000000000000000000000000000001" as const;
+const DEMO_FAUCET_REFRESH_EVENT = "kyute-demo-faucet-funded";
 
 const trimAmount = (value: string) =>
   value.includes(".") ? value.replace(/\.?0+$/, "") : value;
@@ -59,9 +62,12 @@ export function VaultDepositPanel() {
 
 function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${string}` }) {
   const account = useActiveAccount();
+  const activeChain = useActiveWalletChain();
+  const switchActiveWalletChain = useSwitchActiveWalletChain();
   const invalidateContractQuery = useInvalidateContractQuery();
   const [amount, setAmount] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [isSwitching, setIsSwitching] = useState(false);
 
   const vaultContract = useMemo(
     () =>
@@ -142,20 +148,44 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
   const insufficientBalance = amountWei !== null && balance !== undefined ? balance < amountWei : false;
   const invalidAmount = amount.trim().length > 0 && amountWei === null;
 
-  const refreshContracts = () => {
+  const refreshContracts = useCallback(() => {
     if (vaultAddress) {
       invalidateContractQuery({ chainId: kyuteVaultChain.id, contractAddress: vaultAddress });
     }
     if (typeof assetAddress === "string") {
       invalidateContractQuery({ chainId: kyuteVaultChain.id, contractAddress: assetAddress });
     }
-  };
+  }, [assetAddress, invalidateContractQuery, vaultAddress]);
+
+  useEffect(() => {
+    const onRefresh = () => {
+      refreshContracts();
+      setStatusMessage("Demo faucet funded this wallet. Approve and deposit are ready once you switch to the vault chain.");
+    };
+
+    window.addEventListener(DEMO_FAUCET_REFRESH_EVENT, onRefresh);
+    return () => window.removeEventListener(DEMO_FAUCET_REFRESH_EVENT, onRefresh);
+  }, [refreshContracts]);
 
   const totalAssetsLabel = formatTokenAmount(totalAssetsData as bigint | undefined, decimals, "--");
   const balanceLabel = formatTokenAmount(balance, decimals, "--");
   const allowanceLabel = formatTokenAmount(allowance, decimals, "--");
   const depositedLabel = formatTokenAmount(depositedAssetsData as bigint | undefined, decimals, "--");
   const sharesLabel = formatTokenAmount(sharesData as bigint | undefined, decimals, "--");
+  const isCorrectChain = activeChain?.id === kyuteVaultChain.id;
+  const needsChainSwitch = Boolean(account) && !isCorrectChain;
+
+  const onSwitchChain = async () => {
+    try {
+      setIsSwitching(true);
+      await switchActiveWalletChain(kyuteVaultChain);
+      setStatusMessage(`Wallet switched to ${kyuteVaultChainLabel}.`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error ? error.message : `Failed to switch to ${kyuteVaultChainLabel}.`);
+    } finally {
+      setIsSwitching(false);
+    }
+  };
 
   return (
     <aside className="rounded-[30px] border border-white/8 bg-[radial-gradient(circle_at_top,_rgba(16,185,129,0.14),_transparent_40%),linear-gradient(180deg,#0d1214,#090b0f)] p-5 shadow-[0_24px_80px_rgba(0,0,0,0.35)]">
@@ -217,6 +247,21 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
         </div>
 
         <div className="mt-4 grid gap-3">
+          {needsChainSwitch ? (
+            <button
+              type="button"
+              onClick={() => void onSwitchChain()}
+              disabled={isSwitching}
+              className={cn(
+                actionButtonClassName,
+                "border-amber-300/30 bg-amber-300/10 text-amber-100 hover:bg-amber-300/16",
+                isSwitching ? "cursor-wait opacity-70" : "",
+              )}
+            >
+              {isSwitching ? `Switching to ${kyuteVaultChainLabel}` : `Switch to ${kyuteVaultChainLabel}`}
+            </button>
+          ) : null}
+
           {typeof assetAddress === "string" ? (
             <>
               <TransactionButton
@@ -227,7 +272,7 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
                     params: [vaultAddress, amountWei ?? BigInt(0)],
                   })
                 }
-                disabled={!account || !amountWei || invalidAmount || insufficientBalance || !needsApproval}
+                disabled={!account || !isCorrectChain || !amountWei || invalidAmount || insufficientBalance || !needsApproval}
                 onTransactionConfirmed={() => {
                   refreshContracts();
                   setStatusMessage(`Collateral approved for ${formatAddress(vaultAddress, 5)}.`);
@@ -254,7 +299,7 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
                     params: [amountWei ?? BigInt(0), account?.address ?? "0x0000000000000000000000000000000000000000"],
                   })
                 }
-                disabled={!account || !amountWei || invalidAmount || insufficientBalance || needsApproval}
+                disabled={!account || !isCorrectChain || !amountWei || invalidAmount || insufficientBalance || needsApproval}
                 onTransactionConfirmed={() => {
                   refreshContracts();
                   setStatusMessage(`Deposited ${amount.trim()} ${symbol} into the vault.`);
@@ -283,6 +328,11 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
           {invalidAmount ? <p className="text-amber-300/90">Enter a valid positive amount.</p> : null}
           {insufficientBalance ? <p className="text-rose-300/90">Wallet balance is below the requested deposit.</p> : null}
           {!account ? <p className="text-neutral-400">Connect the wallet you want to fund from.</p> : null}
+          {needsChainSwitch ? (
+            <p className="text-amber-200/90">
+              Wallet is on chain {activeChain?.id ?? "unknown"}. Switch to {kyuteVaultChainLabel} before approve and deposit.
+            </p>
+          ) : null}
           {statusMessage ? <p className="text-emerald-200/90">{statusMessage}</p> : null}
           <p className="text-neutral-500">
             In demo mode the vault runs on local Anvil. Your wallet must be switched to the vault chain before approve and deposit can succeed.
