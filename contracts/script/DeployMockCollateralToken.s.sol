@@ -9,17 +9,11 @@ import {MockCollateralToken} from "../src/mocks/MockCollateralToken.sol";
  */
 contract DeployMockCollateralToken is Script {
     function run() external returns (MockCollateralToken token) {
-        uint256 deployerPrivateKey = vm.envOr("PRIVATE_KEY", uint256(0));
-
-        if (deployerPrivateKey == 0) {
-            vm.startBroadcast();
-        } else {
-            vm.startBroadcast(deployerPrivateKey);
-        }
+        // Let the forge CLI control the broadcast signer via --private-key/--sender.
+        vm.startBroadcast();
 
         token = new MockCollateralToken();
 
         vm.stopBroadcast();
     }
 }
-
