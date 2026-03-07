@@ -12,7 +12,8 @@ type StrategyCardProps = {
   readiness: "live" | "config_only" | "draft";
   payoffLines: string[];
   detail: string;
-  onToggle: () => void;
+  onToggle?: () => void;
+  actionLabel?: string;
   children?: ReactNode;
 };
 
@@ -31,6 +32,7 @@ export function StrategyCard({
   payoffLines,
   detail,
   onToggle,
+  actionLabel,
   children,
 }: StrategyCardProps) {
   return (
@@ -77,18 +79,24 @@ export function StrategyCard({
           <p className="mt-2 max-w-2xl text-sm leading-6 text-neutral-400">{subtitle}</p>
         </div>
 
-        <button
-          type="button"
-          onClick={onToggle}
-          className={cn(
-            "inline-flex h-11 shrink-0 items-center justify-center rounded-full border px-4 text-xs font-mono uppercase tracking-[0.2em] transition-colors",
-            enabled
-              ? "border-emerald-400/30 bg-emerald-400/12 text-emerald-300 hover:bg-emerald-400/18"
-              : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10",
-          )}
-        >
-          {enabled ? "Enabled" : "Enable"}
-        </button>
+        {onToggle ? (
+          <button
+            type="button"
+            onClick={onToggle}
+            className={cn(
+              "inline-flex h-11 shrink-0 items-center justify-center rounded-full border px-4 text-xs font-mono uppercase tracking-[0.2em] transition-colors",
+              enabled
+                ? "border-emerald-400/30 bg-emerald-400/12 text-emerald-300 hover:bg-emerald-400/18"
+                : "border-white/10 bg-white/5 text-neutral-300 hover:bg-white/10",
+            )}
+          >
+            {actionLabel ?? (enabled ? "Enabled" : "Enable")}
+          </button>
+        ) : (
+          <div className="inline-flex h-11 shrink-0 items-center justify-center rounded-full border border-white/10 bg-white/5 px-4 text-xs font-mono uppercase tracking-[0.2em] text-neutral-400">
+            {actionLabel ?? "Configured below"}
+          </div>
+        )}
       </div>
 
       <div className="mt-5 grid gap-4 md:grid-cols-[minmax(0,1.1fr)_minmax(0,0.9fr)]">
