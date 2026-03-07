@@ -1303,6 +1303,30 @@ const fetchLiveInputSnapshot = (
   return { funding, borosQuote, position };
 };
 
+const resolveExecutionOutcome = (args: {
+  action: "OPEN_HEDGE" | "CLOSE_HEDGE" | "SKIP";
+  shouldHedge: boolean;
+  executeOnchain: boolean;
+  directExecuteSucceeded: boolean;
+  reportWriteSucceeded: boolean;
+}): string => {
+  if (args.action === "SKIP") {
+    return args.shouldHedge ? "HEDGE_ALREADY_IN_SYNC" : "HEDGE_NOT_REQUIRED";
+  }
+
+  const actionLabel = args.action === "OPEN_HEDGE" ? "OPEN" : "CLOSE";
+  if (!args.executeOnchain) {
+    return `HEDGE_${actionLabel}_PLANNED`;
+  }
+  if (args.directExecuteSucceeded) {
+    return `HEDGE_${actionLabel}_EXECUTED`;
+  }
+  if (args.reportWriteSucceeded) {
+    return `HEDGE_${actionLabel}_REPORTED`;
+  }
+  return `HEDGE_${actionLabel}_FAILED`;
+};
+
 const onCronTrigger = async (runtime: Runtime<Config>) => {
   try {
     const http = new HTTPClient();
@@ -1586,6 +1610,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
 
   if (executeOnchain) {
     let directExecuteSucceeded = false;
+    let reportWriteSucceeded = false;
 
     if (!executionPlan.executeNeeded) {
       runtime.log(`No vault execution needed; action=${executionPlan.action}`);
@@ -1749,14 +1774,37 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
           receiver,
           report: signedReport,
         }).result();
+        reportWriteSucceeded = true;
       }
     }
+
+    if (executionPlan.executeNeeded && !directExecuteSucceeded && !reportWriteSucceeded) {
+      throw new Error(`Hedge execution required but no write path succeeded (action=${executionPlan.action})`);
+    }
+
+    const executionOutcome = resolveExecutionOutcome({
+      action: executionPlan.action,
+      shouldHedge,
+      executeOnchain,
+      directExecuteSucceeded,
+      reportWriteSucceeded,
+    });
+    runtime.log(`Hedge Execution Outcome: ${executionOutcome}`);
+    runtime.log(`Hedge Decision Computed: ${shouldHedge}`);
+    return executionOutcome;
   } else {
     runtime.log(`Onchain execution disabled; report payload bytes=${reportBytes.length}`);
+    const executionOutcome = resolveExecutionOutcome({
+      action: executionPlan.action,
+      shouldHedge,
+      executeOnchain,
+      directExecuteSucceeded: false,
+      reportWriteSucceeded: false,
+    });
+    runtime.log(`Hedge Execution Outcome: ${executionOutcome}`);
+    runtime.log(`Hedge Decision Computed: ${shouldHedge}`);
+    return executionOutcome;
   }
-
-  runtime.log(`Hedge Decision Computed: ${shouldHedge}`);
-  return shouldHedge ? "HEDGED_APPLIED_TO_VAULT" : "HEDGE_SKIPPED";
   } catch (error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     runtime.log(`kyute-agent failure: ${message}`);

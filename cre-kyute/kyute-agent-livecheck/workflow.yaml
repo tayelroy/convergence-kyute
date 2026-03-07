@@ -1,0 +1,7 @@
+staging-settings:
+  user-workflow:
+    workflow-name: "kyute-agent-livecheck"
+  workflow-artifacts:
+    workflow-path: "../kyute-agent/main.ts"
+    config-path: "/tmp/kyute-agent-decision-only.json"
+    secrets-path: "../secrets.yaml"
