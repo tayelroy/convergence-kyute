@@ -137,6 +137,17 @@ stop_existing_anvil_on_port() {
     fi
 }
 
+stop_existing_sidecar_on_port() {
+    local port="$1"
+    local pids
+    pids=$(lsof -ti "tcp:${port}" -sTCP:LISTEN 2>/dev/null || true)
+    if [ -n "${pids}" ]; then
+        echo "   • Sidecar port ${port} already in use. Stopping existing process(es): ${pids}"
+        kill ${pids} 2>/dev/null || true
+        sleep 1
+    fi
+}
+
 echo "[1/4] Starting local Anvil chain..."
 stop_existing_anvil_on_port
 if [ "${DEMO_NO_FORK}" = "true" ]; then
@@ -198,6 +209,11 @@ sync_frontend_demo_env() {
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "BOROS_COLLATERAL_ADDRESS" "${BOROS_COLLATERAL_ADDRESS}"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "BOROS_YU_TOKEN" "${DEFAULT_YU_TOKEN}"
     upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_KYUTE_CHAIN_ID" "31337"
+    local canonical_wallet
+    canonical_wallet=$(resolve_canonical_demo_wallet || true)
+    if [[ "${canonical_wallet}" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_CANONICAL_HL_WALLET" "${canonical_wallet}"
+    fi
     echo "   ✓ Synced frontend demo env at ${FRONTEND_ENV_LOCAL}"
 }
 
@@ -505,6 +521,7 @@ cd "${CRE_DIR}"
 bun run boros-fetcher.ts > /dev/null 2>&1 &
 FETCHER_PID=$!
 echo "   ✓ Telemetry sidecar running in background (PID: ${FETCHER_PID})"
+stop_existing_sidecar_on_port "${KYUTE_AGENT_SIDECAR_PORT}"
 bun run kyute-agent-sidecar.ts > /tmp/kyute_agent_sidecar.log 2>&1 &
 AGENT_SIDECAR_PID=$!
 sleep 1

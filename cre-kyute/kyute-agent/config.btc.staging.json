@@ -1,0 +1,17 @@
+{
+  "schedule": "* * * * *",
+  "vaultAddress": "0x948b3c65b89df0b4894abe91e6d02fe579834f8f",
+  "agentSidecarUrl": "http://127.0.0.1:8791",
+  "supabaseUrl": "https://iskvnrguqbgwsvblhkgz.supabase.co",
+  "yuToken": "0x0000000000000000000000000000000000000002",
+  "hlAddress": "0xF2913330Bf7dEFC985618dE15f16F0D0c2f69d6C",
+  "marketCoin": "BTC",
+  "marketPair": "BTCUSDC",
+  "borosMarketId": 61,
+  "hlFundingTestnet": false,
+  "hlPositionTestnet": true,
+  "hlTestnet": true,
+  "thresholdBp": 0,
+  "windowHours": 1,
+  "executeOnchain": true
+}

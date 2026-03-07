@@ -59,7 +59,34 @@ export const VAULT_ABI = [
       { name: "targetHedgeIsLong", type: "bool" },
     ],
   },
+  {
+    type: "function",
+    name: "userMarketPositions",
+    stateMutability: "view",
+    inputs: [
+      { name: "user", type: "address" },
+      { name: "yuToken", type: "address" },
+    ],
+    outputs: [
+      { name: "asset", type: "address" },
+      { name: "isLong", type: "bool" },
+      { name: "notional", type: "uint256" },
+      { name: "leverage", type: "uint256" },
+      { name: "hasBorosHedge", type: "bool" },
+      { name: "yuToken", type: "address" },
+      { name: "lastUpdateTimestamp", type: "uint256" },
+      { name: "targetHedgeNotional", type: "uint256" },
+      { name: "currentHedgeNotional", type: "uint256" },
+      { name: "currentHedgeIsLong", type: "bool" },
+      { name: "targetHedgeIsLong", type: "bool" },
+    ],
+  },
 ] as const;
+
+export const DEFAULT_MARKET_YU_TOKENS = {
+  ETH: "0x0000000000000000000000000000000000000001" as Address,
+  BTC: "0x0000000000000000000000000000000000000002" as Address,
+} as const;
 
 export const ERC20_ABI = [
   {

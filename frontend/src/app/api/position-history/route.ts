@@ -28,7 +28,7 @@ const buildSeriesFromFills = (fills: Fill[], coin: string): Point[] => {
     running += fill.side === "B" ? sz : -sz;
     points.push({
       timestamp: new Date(Number(fill.time ?? Date.now())).toISOString(),
-      total_open: Math.abs(running),
+      total_open: running,
     });
   }
   return points;
@@ -86,7 +86,7 @@ const fetchCurrentOpen = async (wallet: string, testnet: boolean, coin: string):
     if (rowCoin !== coin.toUpperCase()) return sum;
     const szi = Number(row?.position?.szi ?? 0);
     if (!Number.isFinite(szi)) return sum;
-    return sum + Math.abs(szi);
+    return sum + szi;
   }, 0);
 };
 
@@ -142,7 +142,7 @@ export async function GET(request: Request) {
 
       if (series.length === 0) {
         const currentOpen = await fetchCurrentOpen(wallet, testnet, coin);
-        if (currentOpen > 0) {
+        if (Math.abs(currentOpen) > 0) {
           series = [
             {
               timestamp: new Date().toISOString(),

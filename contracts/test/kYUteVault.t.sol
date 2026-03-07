@@ -93,6 +93,10 @@ contract kYUteVaultTest is Test {
     address public canonicalUser = address(0x33);
     address public attacker = address(0x4);
     address public liquidityProvider = address(0x5);
+    address public ethAsset = address(0x11);
+    address public btcAsset = address(0x22);
+    address public ethYuToken = address(0x101);
+    address public btcYuToken = address(0x202);
 
     function setUp() public {
         vm.startPrank(owner);
@@ -108,6 +112,13 @@ contract kYUteVaultTest is Test {
         asset.approve(address(vault), type(uint256).max);
         vault.deposit(100 ether, user); // Provide vault with some TVL
         vm.stopPrank();
+    }
+
+    function _contains(address[] memory values, address target) internal pure returns (bool) {
+        for (uint256 i = 0; i < values.length; i++) {
+            if (values[i] == target) return true;
+        }
+        return false;
     }
 
     function test_OpenHyperliquidPosition() public {
@@ -638,5 +649,149 @@ contract kYUteVaultTest is Test {
             block.timestamp,
             keccak256("proof")
         );
+    }
+
+    function test_OpenHyperliquidPositionForMarket_TracksMultipleMarkets() public {
+        vm.startPrank(user);
+        vault.openHyperliquidPositionForMarket("", 123, ethYuToken, ethAsset, true, 10 ether, 5);
+        vault.openHyperliquidPositionForMarket("", 123, btcYuToken, btcAsset, false, 2 ether, 3);
+        vm.stopPrank();
+
+        address[] memory trackedMarkets = vault.userTrackedMarkets(user);
+        assertEq(trackedMarkets.length, 2);
+        assertTrue(_contains(trackedMarkets, ethYuToken));
+        assertTrue(_contains(trackedMarkets, btcYuToken));
+
+        (
+            address ethPosAsset,
+            bool ethIsLong,
+            uint256 ethNotional,
+            ,
+            ,
+            address ethTrackedYuToken,
+            ,
+            ,
+            ,
+            ,
+        ) = vault.userMarketPositions(user, ethYuToken);
+        assertEq(ethPosAsset, ethAsset);
+        assertEq(ethIsLong, true);
+        assertEq(ethNotional, 10 ether);
+        assertEq(ethTrackedYuToken, ethYuToken);
+
+        (
+            address btcPosAsset,
+            bool btcIsLong,
+            uint256 btcNotional,
+            ,
+            ,
+            address btcTrackedYuToken,
+            ,
+            ,
+            ,
+            ,
+        ) = vault.userMarketPositions(user, btcYuToken);
+        assertEq(btcPosAsset, btcAsset);
+        assertEq(btcIsLong, false);
+        assertEq(btcNotional, 2 ether);
+        assertEq(btcTrackedYuToken, btcYuToken);
+    }
+
+    function test_ExecuteHedge_SupportsSimultaneousDualMarkets() public {
+        vm.startPrank(user);
+        vault.openHyperliquidPositionForMarket("", 123, ethYuToken, ethAsset, true, 10 ether, 5);
+        vault.openHyperliquidPositionForMarket("", 123, btcYuToken, btcAsset, false, 2 ether, 3);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 1 hours);
+        vm.startPrank(creOperator);
+        vault.executeHedge(123, true, ethYuToken, 1500, 6500, 1000, 10 ether, block.timestamp, keccak256("eth-proof"));
+        vault.executeHedge(123, true, btcYuToken, 1500, 6500, 1000, 2 ether, block.timestamp, keccak256("btc-proof"));
+        vm.stopPrank();
+
+        (
+            ,
+            ,
+            ,
+            ,
+            bool ethHasBorosHedge,
+            address ethTrackedYuToken,
+            ,
+            ,
+            uint256 ethCurrentHedgeNotional,
+            bool ethCurrentHedgeIsLong,
+            bool ethTargetHedgeIsLong
+        ) = vault.userMarketPositions(user, ethYuToken);
+        assertTrue(ethHasBorosHedge);
+        assertEq(ethTrackedYuToken, ethYuToken);
+        assertEq(ethCurrentHedgeNotional, 10 ether);
+        assertTrue(ethCurrentHedgeIsLong);
+        assertTrue(ethTargetHedgeIsLong);
+
+        (
+            ,
+            ,
+            ,
+            ,
+            bool btcHasBorosHedge,
+            address btcTrackedYuToken,
+            ,
+            ,
+            uint256 btcCurrentHedgeNotional,
+            bool btcCurrentHedgeIsLong,
+            bool btcTargetHedgeIsLong
+        ) = vault.userMarketPositions(user, btcYuToken);
+        assertTrue(btcHasBorosHedge);
+        assertEq(btcTrackedYuToken, btcYuToken);
+        assertEq(btcCurrentHedgeNotional, 2 ether);
+        assertTrue(btcCurrentHedgeIsLong);
+        assertTrue(btcTargetHedgeIsLong);
+
+        assertEq(router.openCount(), 2);
+    }
+
+    function test_ExecuteHedge_Revert_UserCollateralCapBreachAcrossMarkets() public {
+        vm.startPrank(liquidityProvider);
+        asset.approve(address(vault), type(uint256).max);
+        vault.deposit(1000 ether, liquidityProvider);
+        vm.stopPrank();
+
+        vm.startPrank(user);
+        vault.openHyperliquidPositionForMarket("", 123, ethYuToken, ethAsset, true, 60 ether, 5);
+        vault.openHyperliquidPositionForMarket("", 123, btcYuToken, btcAsset, true, 50 ether, 5);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 1 hours);
+        vm.prank(creOperator);
+        vault.executeHedge(123, true, ethYuToken, 1500, 6500, 1000, 60 ether, block.timestamp, keccak256("eth-cap"));
+
+        vm.prank(creOperator);
+        vm.expectRevert(kYUteVault.UserCollateralCapBreach.selector);
+        vault.executeHedge(123, true, btcYuToken, 1500, 6500, 1000, 50 ether, block.timestamp, keccak256("btc-cap"));
+    }
+
+    function test_CloseAllPositions_ClosesDualMarketHedges() public {
+        vm.startPrank(user);
+        vault.openHyperliquidPositionForMarket("", 123, ethYuToken, ethAsset, true, 10 ether, 5);
+        vault.openHyperliquidPositionForMarket("", 123, btcYuToken, btcAsset, false, 2 ether, 3);
+        vm.stopPrank();
+
+        vm.warp(block.timestamp + 1 hours);
+        vm.startPrank(creOperator);
+        vault.executeHedge(123, true, ethYuToken, 1500, 6500, 1000, 10 ether, block.timestamp, keccak256("eth-close"));
+        vault.executeHedge(123, true, btcYuToken, 1500, 6500, 1000, 2 ether, block.timestamp, keccak256("btc-close"));
+        vm.stopPrank();
+
+        vm.prank(user);
+        vault.closeAllPositions(user);
+
+        address[] memory trackedMarkets = vault.userTrackedMarkets(user);
+        assertEq(trackedMarkets.length, 0);
+        assertEq(router.closeCount(), 2);
+
+        (address clearedEthAsset,,,,,,,,,,) = vault.userMarketPositions(user, ethYuToken);
+        (address clearedBtcAsset,,,,,,,,,,) = vault.userMarketPositions(user, btcYuToken);
+        assertEq(clearedEthAsset, address(0));
+        assertEq(clearedBtcAsset, address(0));
     }
 }

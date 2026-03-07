@@ -90,15 +90,18 @@ const parseHedgeSide = (row: RawHedgeEvent): HedgeSide => {
 
 const normalizeHedgeEvents = (rows: RawHedgeEvent[]): NormalizedHedgeEvent[] => {
     const sortedAsc = [...rows].sort((a, b) => toMillis(a.timestamp) - toMillis(b.timestamp));
-    let running = 0;
-    let side: HedgeSide = null;
+    const runningByAsset = new Map<string, { running: number; side: HedgeSide }>();
 
     const normalizedAsc = sortedAsc.map((row) => {
+        const assetKey = String(row.asset_symbol ?? "UNKNOWN").toUpperCase();
         const amountEth = Number(row.amount_eth ?? 0);
         const amount = Number.isFinite(amountEth) ? Math.max(0, amountEth) : 0;
         const direction = parseHedgeDirection(row);
         const parsedSide = parseHedgeSide(row);
         const isSuccess = String(row.status ?? "").toLowerCase() === "success";
+        const current = runningByAsset.get(assetKey) ?? { running: 0, side: null };
+        let running = current.running;
+        let side = current.side;
         const previousRunning = running;
 
         if (isSuccess) {
@@ -121,6 +124,8 @@ const normalizeHedgeEvents = (rows: RawHedgeEvent[]): NormalizedHedgeEvent[] => 
                 side = null;
             }
         }
+
+        runningByAsset.set(assetKey, { running, side });
 
         const delta = running - previousRunning;
         return {
@@ -197,6 +202,46 @@ const resolveActiveRouterAddress = (): string | null => {
     const runFile = findLatestRunJson("DeployMockBorosRouter.s.sol");
     if (!runFile) return null;
     return parseLatestContractAddress(runFile, ["MockBorosRouter"]);
+};
+
+const CRE_LOG_PATH = "/tmp/kyute_cre.log";
+const CRE_USER_LOG_RE = /^(\d{4}-\d{2}-\d{2}T[^\s]+)\s+\[USER LOG\]\s+(.*)$/;
+const CRE_RESULT_MARKER_RE = /^✓ Workflow Simulation Result:\s*$/;
+
+const parseCreWorkflowLogEvents = (): Array<{ timestamp: string; status: string; reason: string; action: string }> => {
+    if (!fs.existsSync(CRE_LOG_PATH)) return [];
+    try {
+        const lines = fs.readFileSync(CRE_LOG_PATH, "utf8").split(/\r?\n/).filter(Boolean);
+        const events: Array<{ timestamp: string; status: string; reason: string; action: string }> = [];
+        for (let i = 0; i < lines.length; i += 1) {
+            const line = lines[i];
+            const userLog = line.match(CRE_USER_LOG_RE);
+            if (userLog) {
+                const [, timestamp, message] = userLog;
+                events.push({
+                    timestamp,
+                    status: "success",
+                    reason: message,
+                    action: "CRE_USER_LOG",
+                });
+                continue;
+            }
+            if (CRE_RESULT_MARKER_RE.test(line)) {
+                const next = (lines[i + 1] ?? "").trim();
+                if (next.startsWith("\"") && next.endsWith("\"")) {
+                    events.push({
+                        timestamp: new Date().toISOString(),
+                        status: "success",
+                        reason: `Workflow Simulation Result: ${next}`,
+                        action: "WORKFLOW_RESULT",
+                    });
+                }
+            }
+        }
+        return events.sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp)).slice(0, 30);
+    } catch {
+        return [];
+    }
 };
 
 export async function GET() {
@@ -299,7 +344,15 @@ export async function GET() {
                 : hedgesRaw,
         );
         const aiLogs = aiLogsResult.data ?? [];
-        const chainlinkAutomation = automationResult.data ?? [];
+        const chainlinkAutomationRows = (automationResult.data ?? []) as Array<{
+            timestamp: string;
+            status: string;
+            reason: string;
+            action: string;
+        }>;
+        const chainlinkAutomation = [...parseCreWorkflowLogEvents(), ...chainlinkAutomationRows]
+            .sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp))
+            .slice(0, 40);
         const chainlinkFunctions = functionsResult.data ?? [];
         const chainlinkFeedRaw = feedResult.data ?? [];
         const chainlinkCcip = ccipResult.data ?? [];
