@@ -1195,7 +1195,7 @@ const executeDecisionViaSidecar = (
     baseUrl: string;
     payload: Record<string, unknown>;
   },
-): { ok: boolean; syncTxHash?: string | null; executeTxHash?: string | null } => {
+): { ok: boolean; syncTxHash: string; executeTxHash: string } => {
   const response = requester.sendRequest({
     url: `${args.baseUrl.replace(/\/+$/, "")}/internal/execute-hedge`,
     method: "POST",
@@ -1213,7 +1213,12 @@ const executeDecisionViaSidecar = (
   if (!parsed.ok) {
     throw new Error(parsed.error ?? "Agent sidecar execute request failed");
   }
-  return { ok: true, syncTxHash: parsed.syncTxHash, executeTxHash: parsed.executeTxHash };
+  return {
+    ok: true,
+    syncTxHash: typeof parsed.syncTxHash === "string" && parsed.syncTxHash.length > 0 ? parsed.syncTxHash : "none",
+    executeTxHash:
+      typeof parsed.executeTxHash === "string" && parsed.executeTxHash.length > 0 ? parsed.executeTxHash : "none",
+  };
 };
 
 const resolveAgentIdentity = async (params: {
@@ -1613,7 +1618,38 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       let marketExecuted = false;
       if (executeOnchain) {
         if (!executionPlan.executeNeeded) {
-          runtime.log(`${prefix} No vault execution needed; action=${executionPlan.action}`);
+          runtime.log(`${prefix} No vault execution needed; action=${executionPlan.action}. Syncing market state only.`);
+          const sidecarSyncOnly = await http
+            .sendRequest(runtime, executeDecisionViaSidecar, consensusIdenticalAggregation())({
+              baseUrl: agentSidecarUrl,
+              payload: {
+                vaultAddress,
+                userId: userId.toString(),
+                walletAddress: hlWallet.address,
+                yuToken: market.yuToken,
+                assetSymbol: market.coin,
+                borosApr,
+                hlApr: funding.averageFundingBp / 100,
+                spreadBps: (funding.averageFundingBp / 100) - (borosAprBp / 100),
+                marketAddress: market.borosMarketAddress ?? null,
+                predictedAprBp: String(predictedAprBp),
+                confidenceBp: String(confidenceBp),
+                contractBorosAprBp: String(contractBorosAprBp),
+                targetHedgeNotionalWei: targetHedgeNotionalWei.toString(),
+                oracleTimestampSec: oracleTimestamp.oracleTimestampSec.toString(),
+                proofHash,
+                livePositionNotionalWei: livePositionNotionalWei.toString(),
+                positionSide: position.positionSide,
+                targetHedgeIsLong,
+                shouldHedge,
+                executeHedge: false,
+                rpcUrl,
+              },
+            })
+            .result();
+          runtime.log(
+            `${prefix} Agent sidecar sync-only completed syncTx=${sidecarSyncOnly.syncTxHash ?? "none"} executeTx=${sidecarSyncOnly.executeTxHash ?? "none"}`,
+          );
         } else {
           runtime.log(`${prefix} Submitting execute via agent sidecar ${agentSidecarUrl}`);
           const sidecarExecute = await http
@@ -1624,6 +1660,11 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
                 userId: userId.toString(),
                 walletAddress: hlWallet.address,
                 yuToken: market.yuToken,
+                assetSymbol: market.coin,
+                borosApr,
+                hlApr: funding.averageFundingBp / 100,
+                spreadBps: (funding.averageFundingBp / 100) - (borosAprBp / 100),
+                marketAddress: market.borosMarketAddress ?? null,
                 predictedAprBp: String(predictedAprBp),
                 confidenceBp: String(confidenceBp),
                 contractBorosAprBp: String(contractBorosAprBp),

@@ -6,7 +6,12 @@ type Side = "buy" | "sell";
 
 type ActiveAccount = {
   address: string;
-  signTypedData: (typedData: Record<string, unknown>) => Promise<string>;
+  signTypedData: (typedData: {
+    domain: Record<string, unknown>;
+    types: Record<string, readonly { name: string; type: string }[]>;
+    primaryType: string;
+    message: Record<string, unknown>;
+  }) => Promise<string>;
 };
 
 type ExecuteEthOrderParams = {
@@ -120,7 +125,7 @@ const signTypedDataWithFallback = async (
       chainId: number;
       verifyingContract: `0x${string}`;
     };
-    types: Record<string, Array<{ name: string; type: string }>>;
+    types: Record<string, readonly { name: string; type: string }[]>;
     primaryType: string;
     message: Record<string, unknown>;
   },

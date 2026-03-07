@@ -295,6 +295,7 @@ export default function StrategyPage() {
                 preferences.markets[marketId].mode === "default_hedge",
             )}
             readiness="live"
+            statusLabel="Live now"
             actionLabel="Configured below"
             payoffLines={[
               "Perp leg: keep the directional perp exposure on Hyperliquid.",
@@ -314,6 +315,7 @@ export default function StrategyPage() {
                 preferences.markets[marketId].mode === "dynamic_regime_hedge",
             )}
             readiness="live"
+            statusLabel="Live now"
             actionLabel="Configured below"
             payoffLines={[
               "Pay-floating regime: route to the standard long-YU hedge.",
@@ -329,6 +331,7 @@ export default function StrategyPage() {
             accentClassName="bg-[linear-gradient(90deg,#f59e0b,#fb7185)]"
             enabled={Boolean(generatedPlan)}
             readiness="config_only"
+            statusLabel="Advisory"
             actionLabel="Advisory"
             payoffLines={[
               "Input: your own idea, constraints, and market-specific intent.",

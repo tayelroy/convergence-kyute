@@ -4,13 +4,16 @@ import {
   createPublicClient,
   createWalletClient,
   encodeFunctionData,
+  formatUnits,
   http,
   isAddress,
+  parseEther,
   type Address,
   type Hex,
 } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import type { HedgeMode, PositionSide } from "./hedge-policy.js";
+import { computeHedgePolicy, type HedgeMode, type PositionSide } from "./hedge-policy.js";
+import { buildHedgeExecutionPlan } from "./hedge-execution-plan.js";
 import {
   DEFAULT_BOROS_CORE_API_BASE_URL,
   DEFAULT_BOROS_MARKET_ID,
@@ -35,6 +38,12 @@ const DEFAULT_HL_COIN = "ETH";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const DEFAULT_ETH_YU_TOKEN = "0x0000000000000000000000000000000000000001" as const;
 const DEFAULT_BTC_YU_TOKEN = "0x0000000000000000000000000000000000000002" as const;
+const MIN_CONFIDENCE_BP = 6_000;
+const DEFAULT_ENTRY_THRESHOLD_BP = 40;
+const DEFAULT_EXIT_THRESHOLD_BP = 10;
+const DEFAULT_BOROS_OI_FEE_BP = 10;
+const DEFAULT_REBALANCE_THRESHOLD_BP = 100n;
+const DEFAULT_MIN_REBALANCE_DELTA_WEI = 10_000_000_000_000_000n;
 
 const KYUTE_VAULT_ABI = [
   {
@@ -153,10 +162,26 @@ type AgentSnapshotPayload = {
     source: string;
   };
   strategy: {
+    enabled: boolean;
     mode: HedgeMode;
+    entryThresholdBp?: number;
+    exitThresholdBp?: number;
     source: string;
     warning?: string;
   };
+  decision: {
+    exposure: "pay_floating" | "receive_floating" | "flat";
+    shouldHedge: boolean;
+    targetHedgeIsLong: boolean;
+    edgeBp: number;
+    reason: string;
+    action: "OPEN_HEDGE" | "CLOSE_HEDGE" | "SKIP";
+    executeNeeded: boolean;
+    entryThresholdBp: number;
+    exitThresholdBp: number;
+    enabled: boolean;
+    mode: HedgeMode;
+  } | null;
   vault: {
     mappedUser: Address;
     position: SerializedVaultPosition;
@@ -180,6 +205,12 @@ type ExecuteHedgePayload = {
   userId: string;
   walletAddress: Address;
   yuToken: Address;
+  executeHedge?: boolean;
+  assetSymbol?: string;
+  borosApr?: number;
+  hlApr?: number;
+  spreadBps?: number;
+  marketAddress?: string | null;
   predictedAprBp: string;
   confidenceBp: string;
   contractBorosAprBp: string;
@@ -243,6 +274,40 @@ const postJson = async <T>(url: string, body: unknown): Promise<T> => {
     throw new Error(`HTTP ${response.status} from ${url}: ${await response.text()}`);
   }
   return response.json() as Promise<T>;
+};
+
+const getSupabaseConfig = () => {
+  const supabaseUrl =
+    process.env.CRE_SUPABASE_URL?.trim() ||
+    process.env.SUPABASE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL?.trim() ||
+    "";
+  const supabaseKey =
+    process.env.CRE_SUPABASE_KEY?.trim() ||
+    process.env.SUPABASE_KEY?.trim() ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY?.trim() ||
+    "";
+  return { supabaseUrl, supabaseKey };
+};
+
+const pushKyuteEvent = async (row: Record<string, unknown>) => {
+  const { supabaseUrl, supabaseKey } = getSupabaseConfig();
+  if (!supabaseUrl || !supabaseKey) return;
+
+  const response = await fetch(`${supabaseUrl.replace(/\/+$/, "")}/rest/v1/kyute_events`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      apikey: supabaseKey,
+      authorization: `Bearer ${supabaseKey}`,
+      prefer: "return=minimal",
+    },
+    body: JSON.stringify(row),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Supabase kyute_events insert failed ${response.status}: ${await response.text()}`);
+  }
 };
 
 const normalizeAprDecimal = (value: unknown): number | null => {
@@ -446,6 +511,9 @@ const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> =>
   const borosMarketId = Math.max(1, Math.floor(getNumber(url.searchParams.get("borosMarketId"), DEFAULT_BOROS_MARKET_ID)));
   const borosCoreApiBaseUrl =
     getOptionalString(url.searchParams.get("borosCoreApiBaseUrl")) ?? DEFAULT_BOROS_CORE_API_BASE_URL;
+  const configuredEntryThresholdBp = getNumber(url.searchParams.get("entryThresholdBp"), DEFAULT_ENTRY_THRESHOLD_BP);
+  const configuredExitThresholdBp = getNumber(url.searchParams.get("exitThresholdBp"), DEFAULT_EXIT_THRESHOLD_BP);
+  const borosOiFeeBp = getNumber(url.searchParams.get("oiFeeBp"), DEFAULT_BOROS_OI_FEE_BP);
 
   const supabaseUrl = process.env.SUPABASE_URL?.trim() || process.env.CRE_SUPABASE_URL?.trim();
   const supabaseKey =
@@ -499,6 +567,59 @@ const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> =>
     fetchHlPositionSnapshotNative(hlPositionUrl, identity.record.walletAddress, coin, useMarkPrice),
   ]);
 
+  const serializedPosition = serializePosition(positionState as typeof positionState);
+  const entryThresholdBp = strategy.entryThresholdBp ?? configuredEntryThresholdBp;
+  const exitThresholdBp = strategy.exitThresholdBp ?? configuredExitThresholdBp;
+  const borosAprBp = borosQuote.apr != null ? Math.round(borosQuote.apr * 10_000) : null;
+  const decision =
+    borosAprBp == null
+      ? null
+      : (() => {
+          const baseDecision = computeHedgePolicy({
+            positionSide: position.positionSide,
+            averageFundingBp: funding.averageFundingBp,
+            borosImpliedAprBp: borosAprBp,
+            confidenceBp: 10_000,
+            hasExistingHedge: serializedPosition.hasBorosHedge,
+            existingHedgeIsLong: serializedPosition.currentHedgeIsLong,
+            entryThresholdBp,
+            exitThresholdBp,
+            minConfidenceBp: MIN_CONFIDENCE_BP,
+            oiFeeBp: borosOiFeeBp,
+            mode: strategy.mode,
+          });
+          const appliedDecision = strategy.enabled
+            ? baseDecision
+            : {
+                ...baseDecision,
+                shouldHedge: false,
+                reason: `market disabled by saved strategy config source=${strategy.source}`,
+              };
+          const executionPlan = buildHedgeExecutionPlan({
+            decision: appliedDecision,
+            proposedTargetHedgeNotionalWei: parseEther(position.hedgeNotional.toFixed(18)),
+            currentHedgeWei: BigInt(serializedPosition.currentHedgeNotional),
+            hasExistingHedge: serializedPosition.hasBorosHedge,
+            currentHedgeIsLong: serializedPosition.currentHedgeIsLong,
+            rebalanceThresholdBp: DEFAULT_REBALANCE_THRESHOLD_BP,
+            minRebalanceDeltaWei: DEFAULT_MIN_REBALANCE_DELTA_WEI,
+          });
+
+          return {
+            exposure: appliedDecision.exposure,
+            shouldHedge: executionPlan.shouldHedge,
+            targetHedgeIsLong: executionPlan.targetHedgeIsLong,
+            edgeBp: appliedDecision.edgeBp,
+            reason: appliedDecision.reason,
+            action: executionPlan.action,
+            executeNeeded: executionPlan.executeNeeded,
+            entryThresholdBp,
+            exitThresholdBp,
+            enabled: strategy.enabled,
+            mode: strategy.mode,
+          };
+        })();
+
   return {
     identity: {
       userId: userId.toString(),
@@ -513,9 +634,10 @@ const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> =>
       source: strategy.source,
       ...(strategy.warning ? { warning: strategy.warning } : {}),
     },
+    decision,
     vault: {
       mappedUser: mappedUser as Address,
-      position: serializePosition(positionState as typeof positionState),
+      position: serializedPosition,
     },
     funding,
     borosQuote,
@@ -528,6 +650,7 @@ const executeHedge = async (request: Request): Promise<Response> => {
   const rpcUrl = payload.rpcUrl?.trim() || DEFAULT_RPC_URL;
   const callbackPrivateKey = payload.callbackPrivateKey ?? DEFAULT_CALLBACK_PRIVATE_KEY;
   const { publicClient, walletClient, account } = getClients(rpcUrl, callbackPrivateKey);
+  const shouldExecuteHedge = payload.executeHedge !== false;
 
   if (!walletClient || !account) {
     throw new Error("Callback private key unavailable for execute sidecar");
@@ -609,26 +732,59 @@ const executeHedge = async (request: Request): Promise<Response> => {
     await publicClient.waitForTransactionReceipt({ hash: syncTxHash });
   }
 
-  const executeTxHash = await walletClient.sendTransaction({
-    account,
-    to: payload.vaultAddress,
-    data: encodeFunctionData({
-      abi: KYUTE_VAULT_ABI,
-      functionName: "executeHedge",
-      args: [
-        userId,
-        payload.shouldHedge,
-        payload.yuToken,
-        predictedAprBp,
-        confidenceBp,
-        contractBorosAprBp,
-        targetHedgeNotionalWei,
-        oracleTimestampSec,
-        payload.proofHash,
-      ],
-    }),
-  });
-  await publicClient.waitForTransactionReceipt({ hash: executeTxHash });
+  let executeTxHash: Hex | null = null;
+  if (shouldExecuteHedge) {
+    executeTxHash = await walletClient.sendTransaction({
+      account,
+      to: payload.vaultAddress,
+      data: encodeFunctionData({
+        abi: KYUTE_VAULT_ABI,
+        functionName: "executeHedge",
+        args: [
+          userId,
+          payload.shouldHedge,
+          payload.yuToken,
+          predictedAprBp,
+          confidenceBp,
+          contractBorosAprBp,
+          targetHedgeNotionalWei,
+          oracleTimestampSec,
+          payload.proofHash,
+        ],
+      }),
+    });
+    await publicClient.waitForTransactionReceipt({ hash: executeTxHash });
+  }
+
+  const action = !positionState[4] && payload.shouldHedge
+    ? "OPEN_HEDGE"
+    : positionState[4] && !payload.shouldHedge
+      ? "CLOSE_HEDGE"
+      : "REBALANCE_HEDGE";
+  const amountEth =
+    action === "CLOSE_HEDGE"
+      ? Number(formatUnits(positionState[8], 18))
+      : Number(formatUnits(targetHedgeNotionalWei, 18));
+
+  if (executeTxHash) {
+    try {
+      await pushKyuteEvent({
+        timestamp: new Date().toISOString(),
+        asset_symbol: String(payload.assetSymbol ?? "").trim().toUpperCase() || null,
+        event_type: "hedge",
+        boros_apr: payload.borosApr ?? null,
+        hl_apr: payload.hlApr ?? null,
+        spread_bps: payload.spreadBps ?? null,
+        amount_eth: amountEth,
+        market_address: payload.marketAddress ?? null,
+        status: "success",
+        reason: `sidecar execute user=${payload.walletAddress} shouldHedge=${payload.shouldHedge} before=${positionState[4]} after=${payload.shouldHedge} currentWei=${positionState[8].toString()} targetWei=${targetHedgeNotionalWei.toString()}`,
+        action,
+      });
+    } catch (error) {
+      console.error(`[kyute-agent-sidecar] failed to persist kyute_events hedge row: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
 
   return json({
     ok: true,

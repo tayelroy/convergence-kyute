@@ -10,6 +10,7 @@ type StrategyCardProps = {
   accentClassName: string;
   enabled: boolean;
   readiness: "live" | "config_only" | "draft";
+  statusLabel?: string;
   payoffLines: string[];
   detail: string;
   onToggle?: () => void;
@@ -19,7 +20,7 @@ type StrategyCardProps = {
 
 const readinessLabel: Record<StrategyCardProps["readiness"], string> = {
   live: "Live now",
-  config_only: "UI config only",
+  config_only: "AI-assisted config",
   draft: "Draft prompt only",
 };
 
@@ -29,6 +30,7 @@ export function StrategyCard({
   accentClassName,
   enabled,
   readiness,
+  statusLabel,
   payoffLines,
   detail,
   onToggle,
@@ -59,17 +61,8 @@ export function StrategyCard({
                   : "border-white/10 bg-white/5 text-neutral-500",
               )}
             >
-              {enabled ? (
-                <>
-                  <Check className="mr-1.5 h-3 w-3" />
-                  Armed
-                </>
-              ) : (
-                <>
-                  <CircleDashed className="mr-1.5 h-3 w-3" />
-                  Parked
-                </>
-              )}
+              {enabled ? <Check className="mr-1.5 h-3 w-3" /> : <CircleDashed className="mr-1.5 h-3 w-3" />}
+              {statusLabel ?? (enabled ? "Armed" : "Parked")}
             </span>
             <span className="inline-flex items-center rounded-full border border-white/10 bg-white/5 px-2.5 py-1 text-[10px] font-mono uppercase tracking-[0.24em] text-neutral-400">
               {readinessLabel[readiness]}

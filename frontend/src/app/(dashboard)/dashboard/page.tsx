@@ -2,11 +2,10 @@
 
 import React, { useMemo, useState } from "react";
 import { useActiveAccount } from "thirdweb/react";
-import type { AgentSnapshot, HedgeEvent } from "@/hooks/useAgentStatus";
+import type { HedgeEvent } from "@/hooks/useAgentStatus";
 import { DashboardLayout } from "@/components/dashboard/DashboardLayout";
 import { TickerTape } from "@/components/dashboard/TickerTape";
 import { SavingsPortfolio } from "@/components/dashboard/SavingsPortfolio";
-import { YieldRiskGauge } from "@/components/dashboard/YieldRiskGauge";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
 import { BorosHedgeChart } from "@/components/dashboard/BorosHedgeChart";
 import { useAgentStatus } from "@/hooks/useAgentStatus";
@@ -44,7 +43,6 @@ type MarketViewModel = {
   title: string;
   live: ReturnType<typeof useHyperliquidDashboard>;
   liveVault: ReturnType<typeof useKyuteVaultState>;
-  latestSnapshot: AgentSnapshot | null;
   marketHedges: HedgeEvent[];
   hedgeHistoryPoints: Array<{ timestamp: number; amountYu: number }>;
   hedgeAmountYu: number;
@@ -52,11 +50,14 @@ type MarketViewModel = {
   hedgeSide: "LONG" | "SHORT" | null;
   hedgeLastTimestamp: string | null;
   hlPositionLastUpdated: number | null;
+  ratesSourceLabel: string | null;
   borosAprDisplay: string;
   hlAprDisplay: string;
   spreadBps: number | null;
   yieldAlert: string;
   alertTitle: string;
+  hedgeDebugLabel: string | null;
+  hedgeDebugDetails: string | null;
 };
 
 const normalizeAssetSymbol = (value: string | null | undefined) => String(value ?? "").trim().toUpperCase();
@@ -87,6 +88,9 @@ const buildHedgeHistoryPoints = (
   if (configured) {
     const currentPointTs = hedgeLastTimestamp ? new Date(hedgeLastTimestamp).getTime() : zeroSeriesSeed;
     const lastPoint = points[points.length - 1] ?? null;
+    if (points.length === 0 && currentAmountYu > 0.0000001) {
+      points.push({ timestamp: currentPointTs - 30 * 60 * 1000, amountYu: 0 });
+    }
     if (!lastPoint || Math.abs(lastPoint.amountYu - currentAmountYu) > 0.0000001) {
       points.push({ timestamp: currentPointTs, amountYu: currentAmountYu });
     }
@@ -102,8 +106,6 @@ const buildHedgeHistoryPoints = (
 export default function DashboardPage() {
   const account = useActiveAccount();
   const {
-    latest,
-    history,
     hedges,
     aiLogs,
     chainlinkAutomation,
@@ -142,20 +144,6 @@ export default function DashboardPage() {
   const sharedVaultState = ethVault.configured ? ethVault : btcVault;
   const [zeroSeriesSeed] = useState(() => Date.now());
 
-  const latestSnapshotsByAsset = useMemo(() => {
-    const grouped = new Map<string, AgentSnapshot>();
-    const candidates = [...history];
-    if (latest) candidates.unshift(latest);
-    candidates
-      .sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime())
-      .forEach((snapshot) => {
-        const key = normalizeAssetSymbol(snapshot.asset_symbol);
-        if (!key || grouped.has(key)) return;
-        grouped.set(key, snapshot);
-      });
-    return grouped;
-  }, [history, latest]);
-
   const hedgesByAsset = useMemo(() => {
     const grouped = new Map<string, HedgeEvent[]>();
     for (const hedge of hedges) {
@@ -177,7 +165,6 @@ export default function DashboardPage() {
       title: MARKET_CONFIGS[0].title,
       live: ethLive,
       liveVault: ethVault,
-      latestSnapshot: null,
       marketHedges: [],
       hedgeHistoryPoints: [],
       hedgeAmountYu: 0,
@@ -185,18 +172,20 @@ export default function DashboardPage() {
       hedgeSide: null,
       hedgeLastTimestamp: null,
       hlPositionLastUpdated: null,
+      ratesSourceLabel: null,
       borosAprDisplay: "--",
       hlAprDisplay: "--",
       spreadBps: null,
       yieldAlert: "",
       alertTitle: "",
+      hedgeDebugLabel: null,
+      hedgeDebugDetails: null,
     },
     {
       coin: "BTC",
       title: MARKET_CONFIGS[1].title,
       live: btcLive,
       liveVault: btcVault,
-      latestSnapshot: null,
       marketHedges: [],
       hedgeHistoryPoints: [],
       hedgeAmountYu: 0,
@@ -204,25 +193,16 @@ export default function DashboardPage() {
       hedgeSide: null,
       hedgeLastTimestamp: null,
       hlPositionLastUpdated: null,
+      ratesSourceLabel: null,
       borosAprDisplay: "--",
       hlAprDisplay: "--",
       spreadBps: null,
       yieldAlert: "",
       alertTitle: "",
+      hedgeDebugLabel: null,
+      hedgeDebugDetails: null,
     },
   ].map((market) => {
-    const latestSnapshot = latestSnapshotsByAsset.get(market.coin) ?? (
-      sharedVaultState.configured
-        ? {
-            timestamp: new Date().toISOString(),
-            asset_symbol: market.coin,
-            boros_apr: market.live.borosImpliedApr ?? 0,
-            hl_apr: market.live.hlFundingApr ?? 0,
-            spread_bps: market.live.hlSpreadBps ?? 0,
-            vault_balance_eth: sharedVaultState.totalAssetsEth,
-          }
-        : null
-    );
     const marketHedges = hedgesByAsset.get(market.coin) ?? [];
     const latestHedge = marketHedges[0] ?? null;
     const fallbackLiveHedgeAmountYu = Number.isFinite(Number(latestHedge?.running_size_eth))
@@ -251,27 +231,62 @@ export default function DashboardPage() {
       hedgeLastTimestamp,
       zeroSeriesSeed,
     );
-    const spreadBps = market.live.hlSpreadBps ?? latestSnapshot?.spread_bps ?? null;
+    const spreadBps = market.live.hlSpreadBps;
     const borosAprDisplay = market.live.borosImpliedApr != null
       ? `${market.live.borosImpliedApr.toFixed(2)}%`
-      : latestSnapshot
-        ? `${latestSnapshot.boros_apr.toFixed(2)}%`
-        : loading
-          ? "..."
-          : "--";
+      : loading
+        ? "..."
+        : "--";
     const hlAprDisplay = market.live.hlFundingApr != null
       ? `${market.live.hlFundingApr.toFixed(2)}%`
-      : latestSnapshot
-        ? `${latestSnapshot.hl_apr.toFixed(2)}%`
+      : loading
+        ? "..."
         : "--";
     const yieldAlert = spreadBps != null
       ? `Spread is ${spreadBps.toFixed(1)} bps (HL ${hlAprDisplay} vs Boros ${borosAprDisplay}); ${hasHedge ? `hedge is active${hedgeSide ? ` (${hedgeSide})` : ""}.` : "no hedge is open."}`
-      : "Spread and hedge decision will appear after the first live cycle.";
+      : "Live sidecar data unavailable for this market.";
     const hlPositionLastUpdated = market.live.positionLastUpdate ?? market.live.historyPoints[market.live.historyPoints.length - 1]?.timestamp ?? null;
+    const decision = market.live.hedgeDecision;
+    const hedgeDebugLabel = decision
+      ? !decision.enabled
+        ? "Market disabled"
+        : decision.action === "OPEN_HEDGE"
+          ? `Open ${decision.targetHedgeIsLong ? "long" : "short"} YU`
+          : decision.action === "CLOSE_HEDGE"
+            ? "Close hedge"
+            : decision.shouldHedge
+              ? "Hedge already in sync"
+              : "No hedge required"
+      : null;
+    const hedgeDebugDetails = decision
+      ? [
+          decision.mode ? `mode ${decision.mode}` : null,
+          decision.exposure ? `exposure ${decision.exposure}` : null,
+          decision.edgeBp != null ? `edge ${decision.edgeBp}bp` : null,
+          decision.shouldHedge === false && decision.entryThresholdBp != null
+            ? `entry ${decision.entryThresholdBp}bp`
+            : null,
+          decision.shouldHedge === true && decision.exitThresholdBp != null && decision.action === "SKIP"
+            ? `exit ${decision.exitThresholdBp}bp`
+            : null,
+          decision.reason,
+        ]
+          .filter(Boolean)
+          .join(" • ")
+      : null;
+
+    const alertTitle = decision
+      ? decision.executeNeeded
+        ? "HEDGE ACTION NEEDED"
+        : decision.shouldHedge
+          ? "HEDGE ACTIVE"
+          : "MONITORING SPREAD"
+      : hasHedge
+        ? "HEDGE ACTIVE"
+        : "MONITORING SPREAD";
 
     return {
       ...market,
-      latestSnapshot,
       marketHedges,
       hedgeHistoryPoints,
       hedgeAmountYu,
@@ -279,26 +294,28 @@ export default function DashboardPage() {
       hedgeSide,
       hedgeLastTimestamp,
       hlPositionLastUpdated,
+      ratesSourceLabel: market.live.ratesSourceLabel,
       borosAprDisplay,
       hlAprDisplay,
       spreadBps,
       yieldAlert,
-      alertTitle: hasHedge ? "HEDGE INTERVENTION REQUIRED" : "MONITORING SPREAD",
+      alertTitle,
+      hedgeDebugLabel,
+      hedgeDebugDetails,
     };
   });
 
   const syncLabel = lastUpdated
     ? new Date(lastUpdated).toLocaleTimeString([], { hour12: false })
     : null;
-  const overallLatestSnapshot = latest ?? marketModels.find((market) => market.latestSnapshot)?.latestSnapshot ?? null;
 
   return (
     <DashboardLayout className="min-h-full">
       <TickerTape
         markets={marketModels.map((market) => ({
           label: market.coin,
-          borosRate: market.live.borosImpliedApr ?? market.latestSnapshot?.boros_apr ?? null,
-          hyperliquidRate: market.live.hlFundingApr ?? market.latestSnapshot?.hl_apr ?? null,
+          borosRate: market.live.borosImpliedApr,
+          hyperliquidRate: market.live.hlFundingApr,
           spreadBps: market.spreadBps,
         }))}
         lastSyncLabel={syncLabel}
@@ -334,7 +351,7 @@ export default function DashboardPage() {
                           <p className="mt-2 text-sm font-mono font-bold uppercase tracking-wide text-orange-400">{market.alertTitle}</p>
                         </div>
                         <div className="rounded-full border border-[#2a2f36] px-3 py-1 text-[10px] font-mono uppercase text-[#7a828f]">
-                          {market.coin} • LIVE
+                          {market.coin} • {market.ratesSourceLabel ?? "SOURCE OFFLINE"}
                         </div>
                       </div>
                       <p className="mt-3 text-sm leading-relaxed text-[#d7c2a8]">{market.yieldAlert}</p>
@@ -342,15 +359,25 @@ export default function DashboardPage() {
                         <span className="rounded-sm border border-[#1d232b] px-2 py-1">Spread {market.spreadBps != null ? `${market.spreadBps.toFixed(1)} bps` : "--"}</span>
                         <span className="rounded-sm border border-[#1d232b] px-2 py-1">HL {market.live.positionSide ?? "FLAT"}</span>
                         <span className="rounded-sm border border-[#1d232b] px-2 py-1">Wallet {borosWallet ? borosWallet.slice(0, 6) : "--"}</span>
+                        {market.hedgeDebugLabel && (
+                          <span className="rounded-sm border border-[#2a3320] bg-[#11170d] px-2 py-1 text-[#b6c693]">
+                            {market.hedgeDebugLabel}
+                          </span>
+                        )}
                       </div>
-                      {((market.live.error || error || degraded || !market.latestSnapshot) && !loading) && (
+                      {market.hedgeDebugDetails && (
+                        <p className="mt-3 text-[11px] font-mono leading-relaxed text-[#8f9aa6]">
+                          {market.hedgeDebugDetails}
+                        </p>
+                      )}
+                      {((market.live.error || error || degraded || market.spreadBps == null) && !loading) && (
                         <p className="mt-3 text-[11px] font-mono text-yellow-300/80">
                           {market.live.error
                             ? `Data status: ${market.live.error}`
                             : error
                               ? `Data status: ${error}`
-                              : !market.latestSnapshot
-                                ? "Data status: awaiting first live snapshot."
+                              : market.spreadBps == null
+                                ? "Data status: live sidecar feed unavailable."
                                 : "Data status: degraded telemetry mode."}
                         </p>
                       )}
@@ -392,8 +419,6 @@ export default function DashboardPage() {
         <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
           <div className="h-[300px] lg:col-span-3">
             <SavingsPortfolio
-              latest={null}
-              hedges={hedges}
               loading={loading}
               title="SAVINGS PORTFOLIO"
               liveVaultBalance={sharedVaultState.totalAssetsEth}
@@ -401,7 +426,7 @@ export default function DashboardPage() {
             />
           </div>
 
-          <div className="h-[300px] lg:col-span-6">
+          <div className="h-[300px] lg:col-span-9">
             <ExecutionConsole
               aiLogs={aiLogs}
               hedges={hedges}
@@ -410,16 +435,6 @@ export default function DashboardPage() {
               chainlinkFeed={chainlinkFeed}
               chainlinkCcip={chainlinkCcip}
               loading={loading}
-            />
-          </div>
-
-          <div className="h-[300px] min-w-0 lg:col-span-3">
-            <YieldRiskGauge
-              latest={overallLatestSnapshot}
-              aiLogs={aiLogs}
-              loading={loading}
-              title="VOLATILITY INDEX"
-              sourceLabel={null}
             />
           </div>
         </div>

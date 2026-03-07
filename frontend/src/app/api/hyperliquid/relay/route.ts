@@ -10,6 +10,20 @@ const getBaseUrl = (testnet: boolean): string => {
   return testnet ? "https://api.hyperliquid-testnet.xyz" : "https://api.hyperliquid.xyz";
 };
 
+const RETRYABLE_STATUSES = new Set([502, 503, 504]);
+const MAX_RELAY_ATTEMPTS = 3;
+const RELAY_TIMEOUT_MS = 8_000;
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+const describeRelayFailure = (status: number, kind: "info" | "exchange", testnet: boolean) => {
+  const network = testnet ? "testnet" : "mainnet";
+  if (RETRYABLE_STATUSES.has(status)) {
+    return `Hyperliquid ${network} ${kind} endpoint is temporarily unavailable (${status})`;
+  }
+  return `Hyperliquid ${network} ${kind} endpoint failed (${status})`;
+};
+
 export async function POST(request: Request) {
   try {
     const body = (await request.json()) as RelayRequest;
@@ -56,28 +70,79 @@ export async function POST(request: Request) {
 
     const baseUrl = getBaseUrl(testnet);
     const target = `${baseUrl}/${kind}`;
+    const encodedBody = JSON.stringify(payload);
+    let lastStatus = 500;
+    let lastParsed: unknown = null;
+    let lastError: string | null = null;
 
-    const upstream = await fetch(target, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(payload),
-    });
+    for (let attempt = 1; attempt <= MAX_RELAY_ATTEMPTS; attempt += 1) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), RELAY_TIMEOUT_MS);
 
-    const text = await upstream.text();
-    let parsed: unknown = null;
-    try {
-      parsed = text.length > 0 ? JSON.parse(text) : null;
-    } catch {
-      parsed = { raw: text };
+      try {
+        const upstream = await fetch(target, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: encodedBody,
+          cache: "no-store",
+          signal: controller.signal,
+        });
+
+        clearTimeout(timeout);
+
+        const text = await upstream.text();
+        let parsed: unknown = null;
+        try {
+          parsed = text.length > 0 ? JSON.parse(text) : null;
+        } catch {
+          parsed = { raw: text };
+        }
+
+        if (upstream.ok) {
+          return NextResponse.json(
+            {
+              ok: true,
+              status: upstream.status,
+              data: parsed,
+            },
+            { status: 200 },
+          );
+        }
+
+        lastStatus = upstream.status;
+        lastParsed = parsed;
+        lastError = describeRelayFailure(upstream.status, kind, testnet);
+
+        if (!RETRYABLE_STATUSES.has(upstream.status) || attempt === MAX_RELAY_ATTEMPTS) {
+          break;
+        }
+
+        await sleep(200 * attempt);
+      } catch (error) {
+        clearTimeout(timeout);
+        lastStatus = 502;
+        lastParsed = null;
+        lastError =
+          error instanceof Error && error.name === "AbortError"
+            ? `Hyperliquid ${testnet ? "testnet" : "mainnet"} ${kind} request timed out`
+            : `Hyperliquid ${testnet ? "testnet" : "mainnet"} ${kind} request failed`;
+
+        if (attempt === MAX_RELAY_ATTEMPTS) {
+          break;
+        }
+
+        await sleep(200 * attempt);
+      }
     }
 
     return NextResponse.json(
       {
-        ok: upstream.ok,
-        status: upstream.status,
-        data: parsed,
+        ok: false,
+        status: lastStatus,
+        error: lastError ?? "Hyperliquid relay failed",
+        data: lastParsed,
       },
-      { status: upstream.ok ? 200 : 502 },
+      { status: 502 },
     );
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown relay error";

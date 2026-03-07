@@ -1,5 +1,6 @@
 "use client";
 
+import { Suspense } from "react";
 import Link from "next/link";
 import { motion } from "framer-motion";
 import { LampContainer } from "@/components/ui/lamp";
@@ -10,7 +11,7 @@ import { LiveArbitragePulse } from "@/components/ui/live-arbitrage-pulse";
 import { VaultHeroCard } from "@/components/ui/vault-hero-card";
 import { useSearchParams } from "next/navigation";
 
-export default function LandingPage() {
+function LandingPageContent() {
   const searchParams = useSearchParams();
   const reason = searchParams.get("reason");
 
@@ -91,5 +92,13 @@ export default function LandingPage() {
         </div>
       </LampContainer>
     </main>
+  );
+}
+
+export default function LandingPage() {
+  return (
+    <Suspense fallback={null}>
+      <LandingPageContent />
+    </Suspense>
   );
 }

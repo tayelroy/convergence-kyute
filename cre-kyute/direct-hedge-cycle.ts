@@ -557,8 +557,8 @@ async function main() {
   const rebalanceThresholdBp = parseBigIntEnv("DEMO_REBALANCE_THRESHOLD_BP", DEFAULT_REBALANCE_THRESHOLD_BP);
   const minRebalanceDeltaWei = parseBigIntEnv("DEMO_MIN_REBALANCE_DELTA_WEI", DEFAULT_MIN_REBALANCE_DELTA_WEI);
   const fundingWindowHours = parseNumberEnv("DEMO_HL_WINDOW_HOURS", 1);
-  const entryThresholdBp = parseNumberEnv("DEMO_ENTRY_THRESHOLD_BP", DEFAULT_ENTRY_THRESHOLD_BP);
-  const exitThresholdBp = parseNumberEnv("DEMO_EXIT_THRESHOLD_BP", DEFAULT_EXIT_THRESHOLD_BP);
+  const configuredEntryThresholdBp = parseNumberEnv("DEMO_ENTRY_THRESHOLD_BP", DEFAULT_ENTRY_THRESHOLD_BP);
+  const configuredExitThresholdBp = parseNumberEnv("DEMO_EXIT_THRESHOLD_BP", DEFAULT_EXIT_THRESHOLD_BP);
   const borosOiFeeBp = parseNumberEnv("DEMO_BOROS_OI_FEE_BP", DEFAULT_BOROS_OI_FEE_BP);
   const configuredHedgeMode = resolveConfiguredHedgeMode();
 
@@ -753,8 +753,11 @@ async function main() {
     logger: (message) => console.log(`[direct-hedge] ${message}`),
   });
   const hedgeMode = strategyMode.mode;
+  const strategyEnabled = strategyMode.enabled;
+  const entryThresholdBp = strategyMode.entryThresholdBp ?? configuredEntryThresholdBp;
+  const exitThresholdBp = strategyMode.exitThresholdBp ?? configuredExitThresholdBp;
   console.log(
-    `[direct-hedge] strategy mode source=${strategyMode.source} mode=${hedgeMode} wallet=${hlLookupAddress ?? mappedUser} userId=${userId}`,
+    `[direct-hedge] strategy mode source=${strategyMode.source} enabled=${strategyEnabled} mode=${hedgeMode} entryBp=${entryThresholdBp} exitBp=${exitThresholdBp} wallet=${hlLookupAddress ?? mappedUser} userId=${userId}`,
   );
   if (strategyMode.warning) {
     console.log(`[direct-hedge] strategy mode warning=${strategyMode.warning}`);
@@ -764,7 +767,7 @@ async function main() {
     `[direct-hedge] policy inputs side=${hlSide} averageFundingBp=${averageFundingBp} borosImpliedAprBp=${borosImpliedAprBp} confidenceBp=${confidenceBp} mode=${hedgeMode} entryBp=${entryThresholdBp} exitBp=${exitThresholdBp} oiFeeBp=${borosOiFeeBp}`,
   );
 
-  const decision = computeHedgePolicy({
+  const baseDecision = computeHedgePolicy({
     positionSide: hlSide,
     averageFundingBp,
     borosImpliedAprBp,
@@ -777,6 +780,13 @@ async function main() {
     oiFeeBp: borosOiFeeBp,
     mode: hedgeMode,
   });
+  const decision = strategyEnabled
+    ? baseDecision
+    : {
+        ...baseDecision,
+        shouldHedge: false,
+        reason: `market disabled by saved strategy config source=${strategyMode.source}`,
+      };
   if (forceHedgeOverride !== null) {
     targetSource = `${targetSource}+forced`;
   }
