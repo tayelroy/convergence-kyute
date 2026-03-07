@@ -75,6 +75,12 @@ export interface ChainlinkCcipEvent {
     amount_eth: number;
 }
 
+export interface CreLogLine {
+    id: string;
+    timestamp: string;
+    line: string;
+}
+
 interface SourceState {
     ok: boolean;
     error: string | null;
@@ -90,6 +96,7 @@ interface AgentStatusResponse {
     chainlinkFunctions?: ChainlinkFunctionsEvent[];
     chainlinkFeed?: ChainlinkFeedEvent[];
     chainlinkCcip?: ChainlinkCcipEvent[];
+    creLogLines?: CreLogLine[];
     degraded?: boolean;
     warnings?: string[];
     generatedAt?: string;
@@ -135,7 +142,7 @@ export function useAgentStatus() {
         }
 
         fetchStatus();
-        const interval = setInterval(fetchStatus, 30_000);
+        const interval = setInterval(fetchStatus, 5_000);
         return () => {
             cancelled = true;
             clearInterval(interval);
@@ -157,5 +164,6 @@ export function useAgentStatus() {
         chainlinkFunctions: data?.chainlinkFunctions ?? [],
         chainlinkFeed: data?.chainlinkFeed ?? [],
         chainlinkCcip: data?.chainlinkCcip ?? [],
+        creLogLines: data?.creLogLines ?? [],
     };
 }

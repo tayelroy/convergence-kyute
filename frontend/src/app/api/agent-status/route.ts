@@ -23,6 +23,7 @@ interface AgentStatusResponse {
     chainlinkFunctions: unknown[];
     chainlinkFeed: unknown[];
     chainlinkCcip: unknown[];
+    creLogLines: Array<{ id: string; timestamp: string; line: string }>;
     degraded: boolean;
     warnings: string[];
     generatedAt: string;
@@ -207,17 +208,44 @@ const resolveActiveRouterAddress = (): string | null => {
     return parseLatestContractAddress(runFile, ["MockBorosRouter"]);
 };
 
+const resolveActiveVaultDeployedAtMs = (): number | null => {
+    const runFile = findLatestRunJson("DeployKyuteVault.s.sol");
+    if (!runFile || !fs.existsSync(runFile)) return null;
+
+    try {
+        const mtimeMs = fs.statSync(runFile).mtimeMs;
+        return Number.isFinite(mtimeMs) ? mtimeMs : null;
+    } catch {
+        return null;
+    }
+};
+
 const CRE_LOG_PATH = "/tmp/kyute_cre.log";
 const CRE_USER_LOG_RE = /^(\d{4}-\d{2}-\d{2}T[^\s]+)\s+\[USER LOG\]\s+(.*)$/;
+const CRE_TIMESTAMPED_LINE_RE = /^(\d{4}-\d{2}-\d{2}T[^\s]+)\s+(.*)$/;
 const CRE_RESULT_MARKER_RE = /^✓ Workflow Simulation Result:\s*$/;
 
-const parseCreWorkflowLogEvents = (): Array<{ timestamp: string; status: string; reason: string; action: string }> => {
-    if (!fs.existsSync(CRE_LOG_PATH)) return [];
+const parseCreWorkflowLogEvents = (): {
+    events: Array<{ timestamp: string; status: string; reason: string; action: string }>;
+    rawLines: Array<{ id: string; timestamp: string; line: string }>;
+} => {
+    if (!fs.existsSync(CRE_LOG_PATH)) return { events: [], rawLines: [] };
     try {
         const lines = fs.readFileSync(CRE_LOG_PATH, "utf8").split(/\r?\n/).filter(Boolean);
         const events: Array<{ timestamp: string; status: string; reason: string; action: string }> = [];
+        const rawLines: Array<{ id: string; timestamp: string; line: string }> = [];
+        let lastTimestamp = new Date().toISOString();
         for (let i = 0; i < lines.length; i += 1) {
             const line = lines[i];
+            const timestamped = line.match(CRE_TIMESTAMPED_LINE_RE);
+            if (timestamped) {
+                lastTimestamp = timestamped[1];
+            }
+            rawLines.push({
+                id: `${i}-${line}`,
+                timestamp: lastTimestamp,
+                line,
+            });
             const userLog = line.match(CRE_USER_LOG_RE);
             if (userLog) {
                 const [, timestamp, message] = userLog;
@@ -241,9 +269,12 @@ const parseCreWorkflowLogEvents = (): Array<{ timestamp: string; status: string;
                 }
             }
         }
-        return events.sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp)).slice(0, 30);
+        return {
+            events: events.sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp)).slice(0, 30),
+            rawLines: rawLines.slice(-120),
+        };
     } catch {
-        return [];
+        return { events: [], rawLines: [] };
     }
 };
 
@@ -261,6 +292,7 @@ export async function GET() {
             chainlinkFunctions: [],
             chainlinkFeed: [],
             chainlinkCcip: [],
+            creLogLines: [],
             degraded: true,
             warnings: [],
             generatedAt: new Date().toISOString(),
@@ -282,6 +314,7 @@ export async function GET() {
 
         const supabase = createClient(supabaseUrl, supabaseAnonKey);
         const activeRouterAddress = resolveActiveRouterAddress();
+        const activeVaultDeployedAtMs = resolveActiveVaultDeployedAtMs();
 
         // Run all event queries in parallel
         const [snapshotsResult, hedgesResult, aiLogsResult, automationResult, functionsResult, feedResult, ccipResult] = await Promise.all([
@@ -338,13 +371,28 @@ export async function GET() {
         const warnings: string[] = [];
         const snapshotsRaw = snapshotsResult.data ?? [];
         const hedgesRaw = (hedgesResult.data ?? []) as RawHedgeEvent[];
-        const snapshots = activeRouterAddress
-            ? snapshotsRaw.filter((row) => String((row as { market_address?: string | null }).market_address ?? "").toLowerCase() === activeRouterAddress)
-            : snapshotsRaw;
+        const snapshots = snapshotsRaw.filter((row) => {
+            if (
+                activeRouterAddress &&
+                String((row as { market_address?: string | null }).market_address ?? "").toLowerCase() !== activeRouterAddress
+            ) {
+                return false;
+            }
+            if (activeVaultDeployedAtMs && toMillis(String((row as { timestamp?: string | null }).timestamp ?? "")) < activeVaultDeployedAtMs) {
+                return false;
+            }
+            return true;
+        });
         const hedges = normalizeHedgeEvents(
-            activeRouterAddress
-                ? hedgesRaw.filter((row) => String(row.market_address ?? "").toLowerCase() === activeRouterAddress)
-                : hedgesRaw,
+            hedgesRaw.filter((row) => {
+                if (activeRouterAddress && String(row.market_address ?? "").toLowerCase() !== activeRouterAddress) {
+                    return false;
+                }
+                if (activeVaultDeployedAtMs && toMillis(row.timestamp) < activeVaultDeployedAtMs) {
+                    return false;
+                }
+                return true;
+            }),
         );
         const aiLogs = aiLogsResult.data ?? [];
         const chainlinkAutomationRows = (automationResult.data ?? []) as Array<{
@@ -353,7 +401,8 @@ export async function GET() {
             reason: string;
             action: string;
         }>;
-        const chainlinkAutomation = [...parseCreWorkflowLogEvents(), ...chainlinkAutomationRows]
+        const parsedCreLogs = parseCreWorkflowLogEvents();
+        const chainlinkAutomation = [...parsedCreLogs.events, ...chainlinkAutomationRows]
             .sort((a, b) => toMillis(b.timestamp) - toMillis(a.timestamp))
             .slice(0, 40);
         const chainlinkFunctions = functionsResult.data ?? [];
@@ -378,6 +427,7 @@ export async function GET() {
             chainlinkFunctions,
             chainlinkFeed,
             chainlinkCcip,
+            creLogLines: parsedCreLogs.rawLines,
             degraded: false,
             warnings,
             generatedAt: new Date().toISOString(),
