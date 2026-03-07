@@ -137,12 +137,17 @@ export const readWalletBridgeRecord = async (params: {
   supabaseKey?: string;
   disableFileFallback?: boolean;
   supabaseFetch?: SupabaseRestFetch;
+  throwOnSupabaseError?: boolean;
+  logger?: (message: string) => void;
 }): Promise<WalletBridgeRecord | null> => {
   const supabaseConfig = resolveSupabaseRestConfig({
     supabaseUrl: params.supabaseUrl,
     supabaseKey: params.supabaseKey,
   });
   if (!supabaseConfig) {
+    if (params.throwOnSupabaseError) {
+      throw new Error("Supabase identity lookup unavailable: missing supabaseUrl or supabaseKey");
+    }
     return params.disableFileFallback ? null : readFileRecord(params);
   }
 
@@ -165,7 +170,11 @@ export const readWalletBridgeRecord = async (params: {
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    params.logger?.(`[wallet-bridge] Supabase read failed: ${message}`);
     console.error(`[wallet-bridge] Supabase read failed: ${message}`);
+    if (params.throwOnSupabaseError) {
+      throw new Error(`Supabase wallet bridge read failed: ${message}`);
+    }
     return params.disableFileFallback ? null : readFileRecord(params);
   }
 
@@ -212,4 +221,93 @@ export const resolveWalletUserId = async (params: {
   });
   if (!record) return null;
   return BigInt(record.userId);
+};
+
+export const resolveRequiredWalletIdentity = async (params: {
+  walletAddress?: Address | null;
+  userId?: bigint | null;
+  vaultAddress?: Address;
+  supabaseUrl?: string;
+  supabaseKey?: string;
+  supabaseFetch?: SupabaseRestFetch;
+  logger?: (message: string) => void;
+}): Promise<{ record: WalletBridgeRecord; source: string }> => {
+  const config = resolveSupabaseRestConfig({
+    supabaseUrl: params.supabaseUrl,
+    supabaseKey: params.supabaseKey,
+  });
+  if (!config) {
+    throw new Error("Supabase identity lookup unavailable: missing supabaseUrl or supabaseKey");
+  }
+
+  const baseOptions = {
+    vaultAddress: params.vaultAddress,
+    supabaseUrl: config.supabaseUrl,
+    supabaseKey: config.supabaseKey,
+    disableFileFallback: true,
+    supabaseFetch: params.supabaseFetch,
+    throwOnSupabaseError: true,
+    logger: params.logger,
+  } as const;
+
+  let walletRecord: WalletBridgeRecord | null = null;
+  if (params.walletAddress) {
+    walletRecord = await readWalletBridgeRecord({
+      walletAddress: params.walletAddress,
+      ...baseOptions,
+    });
+    if (!walletRecord) {
+      throw new Error(
+        `No Supabase identity mapping found for wallet ${params.walletAddress}. Register the wallet from the frontend first.`,
+      );
+    }
+  }
+
+  let userRecord: WalletBridgeRecord | null = null;
+  if (params.userId !== null && params.userId !== undefined) {
+    userRecord = await readWalletBridgeRecord({
+      userId: params.userId,
+      ...baseOptions,
+    });
+    if (!userRecord) {
+      throw new Error(
+        `No Supabase identity mapping found for userId=${params.userId.toString()}. Register the wallet from the frontend first.`,
+      );
+    }
+  }
+
+  if (
+    walletRecord &&
+    userRecord &&
+    (
+      String(walletRecord.userId) !== String(userRecord.userId) ||
+      walletRecord.walletAddress.toLowerCase() !== userRecord.walletAddress.toLowerCase()
+    )
+  ) {
+    throw new Error(
+      `Supabase identity mismatch: wallet ${walletRecord.walletAddress} maps to userId=${String(walletRecord.userId)} but requested userId=${params.userId?.toString()}`,
+    );
+  }
+
+  if (walletRecord) return { record: walletRecord, source: "supabase_wallet" };
+  if (userRecord) return { record: userRecord, source: "supabase_user" };
+
+  const latestVaultRecord = await readWalletBridgeRecord(baseOptions);
+  if (latestVaultRecord) {
+    return { record: latestVaultRecord, source: "supabase_latest_vault" };
+  }
+
+  const latestRecord = await readWalletBridgeRecord({
+    supabaseUrl: params.supabaseUrl,
+    supabaseKey: params.supabaseKey,
+    disableFileFallback: true,
+    supabaseFetch: params.supabaseFetch,
+  });
+  if (latestRecord) {
+    return { record: latestRecord, source: "supabase_latest" };
+  }
+
+  throw new Error(
+    "No Supabase identity mapping found. Register a wallet from the frontend before running the hedge workflow.",
+  );
 };

@@ -100,11 +100,7 @@ const nativeFetchText: SupabaseRestFetch = async (url, headers) => {
   };
 };
 
-const buildQueryString = (query: URLSearchParams | Record<string, string>): string => {
-  if (query instanceof URLSearchParams) {
-    return query.toString();
-  }
-
+const buildQueryString = (query: Record<string, string>): string => {
   return Object.entries(query)
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join("&");
@@ -113,12 +109,12 @@ const buildQueryString = (query: URLSearchParams | Record<string, string>): stri
 const buildSelectUrl = (
   supabaseUrl: string,
   table: string,
-  query: URLSearchParams | Record<string, string>,
+  query: Record<string, string>,
 ): string => `${supabaseUrl}/rest/v1/${table}?${buildQueryString(query)}`;
 
 export const selectSupabaseRows = async <TRow>(params: {
   table: string;
-  query: URLSearchParams | Record<string, string>;
+  query: Record<string, string>;
   supabaseUrl?: string;
   supabaseKey?: string;
   fetcher?: SupabaseRestFetch;
