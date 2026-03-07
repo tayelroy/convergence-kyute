@@ -2,8 +2,11 @@ import { NextResponse } from "next/server";
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import { isAddress, type Address } from "viem";
 import {
+  DEFAULT_STRATEGY_PREFERENCES,
+  STRATEGY_MARKETS,
   normalizeStrategyPreferences,
   resolvePrimaryStrategyId,
+  type MarketId,
   type StrategyPreferences,
 } from "@/lib/strategy-preferences";
 
@@ -11,8 +14,11 @@ export const runtime = "nodejs";
 
 const STRATEGY_TABLE = "kyute_user_strategies";
 const USER_WALLET_TABLE = "kyute_user_wallets";
+const DEFAULT_ETH_BOROS_MARKET_ID = 41;
+const DEFAULT_BTC_BOROS_MARKET_ID = 61;
 
 type StrategyDbRow = {
+  id?: number;
   user_id: number | null;
   wallet_address: string;
   vault_address: string | null;
@@ -24,47 +30,45 @@ type StrategyDbRow = {
   enabled_strategies: unknown;
   ai_prompt: string | null;
   codex_tokens: number | null;
+  market_enabled?: boolean | null;
+  entry_threshold_bp?: number | null;
+  exit_threshold_bp?: number | null;
   updated_at: string;
 };
 
-const DEFAULT_ASSET_SYMBOL = "ETH";
 const DEFAULT_VENUE = "HlPerp";
 
-const resolveDefaultBorosMarketAddress = (): string | null => {
-  const value =
-    process.env.BOROS_MARKET_ADDRESS ??
-    process.env.NEXT_PUBLIC_BOROS_MARKET_ADDRESS ??
-    null;
-  return value && isAddress(value) ? value.toLowerCase() : null;
+const resolveMarketKey = (assetSymbol: string, marketAddress: string | null, marketId: number): string =>
+  `${assetSymbol.toLowerCase()}:hlperp:${marketAddress?.toLowerCase() ?? `market-${marketId}`}`;
+
+const DEFAULT_MARKET_METADATA: Record<
+  MarketId,
+  { assetSymbol: string; marketKey: string; borosMarketAddress: string | null }
+> = {
+  ETHUSDC: {
+    assetSymbol: "ETH",
+    borosMarketAddress: normalizeAddress(
+      process.env.NEXT_PUBLIC_BOROS_MARKET_ADDRESS ??
+        process.env.BOROS_MARKET_ADDRESS ??
+        "",
+    ),
+    get marketKey() {
+      return resolveMarketKey("ETH", this.borosMarketAddress, DEFAULT_ETH_BOROS_MARKET_ID);
+    },
+  },
+  BTCUSDC: {
+    assetSymbol: "BTC",
+    borosMarketAddress: null,
+    get marketKey() {
+      return resolveMarketKey("BTC", this.borosMarketAddress, DEFAULT_BTC_BOROS_MARKET_ID);
+    },
+  },
 };
 
-const resolveMarketContext = (input?: {
-  marketKey?: string | null;
-  assetSymbol?: string | null;
-  venue?: string | null;
-  borosMarketAddress?: string | null;
-}) => {
-  const assetSymbol = String(input?.assetSymbol ?? DEFAULT_ASSET_SYMBOL).trim().toUpperCase();
-  const venue = String(input?.venue ?? DEFAULT_VENUE).trim();
-  const borosMarketAddressRaw = String(
-    input?.borosMarketAddress ?? resolveDefaultBorosMarketAddress() ?? "",
-  )
-    .trim()
-    .toLowerCase();
-  const borosMarketAddress =
-    borosMarketAddressRaw && isAddress(borosMarketAddressRaw) ? borosMarketAddressRaw : null;
-  const marketKey =
-    String(input?.marketKey ?? "")
-      .trim()
-      .toLowerCase() || `${assetSymbol.toLowerCase()}:${venue.toLowerCase()}:${borosMarketAddress ?? "default"}`;
-
-  return {
-    marketKey,
-    assetSymbol,
-    venue,
-    borosMarketAddress,
-  };
-};
+function normalizeAddress(value: string | null | undefined): string | null {
+  const trimmed = String(value ?? "").trim().toLowerCase();
+  return trimmed && isAddress(trimmed) ? trimmed : null;
+}
 
 const resolveSupabaseClient = () => {
   const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL ?? process.env.SUPABASE_URL;
@@ -80,60 +84,6 @@ const resolveSupabaseClient = () => {
 
   return createClient(supabaseUrl, supabaseKey);
 };
-
-const parseEnabledStrategies = (value: unknown): StrategyPreferences["enabled"] => {
-  if (Array.isArray(value)) {
-    return normalizeStrategyPreferences({ enabled: value as StrategyPreferences["enabled"] }).enabled;
-  }
-  if (typeof value === "string" && value.trim().startsWith("[")) {
-    try {
-      const parsed = JSON.parse(value);
-      return Array.isArray(parsed)
-        ? normalizeStrategyPreferences({ enabled: parsed as StrategyPreferences["enabled"] }).enabled
-        : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
-};
-
-const mapRowToPreferences = (row: StrategyDbRow): StrategyPreferences =>
-  normalizeStrategyPreferences({
-    enabled: parseEnabledStrategies(row.enabled_strategies),
-    aiPrompt: row.ai_prompt ?? undefined,
-    codexTokens: row.codex_tokens ?? undefined,
-  });
-
-const sortStrategyRows = (
-  rows: StrategyDbRow[],
-  market: ReturnType<typeof resolveMarketContext>,
-): StrategyDbRow[] =>
-  [...rows].sort((left, right) => {
-    const leftMarketKey = String(left.market_key ?? "").trim().toLowerCase();
-    const rightMarketKey = String(right.market_key ?? "").trim().toLowerCase();
-    const leftExactMarket = leftMarketKey !== "" && leftMarketKey === market.marketKey;
-    const rightExactMarket = rightMarketKey !== "" && rightMarketKey === market.marketKey;
-    if (leftExactMarket !== rightExactMarket) return leftExactMarket ? -1 : 1;
-
-    const leftExactBorosMarket =
-      !!market.borosMarketAddress &&
-      String(left.boros_market_address ?? "").trim().toLowerCase() === market.borosMarketAddress;
-    const rightExactBorosMarket =
-      !!market.borosMarketAddress &&
-      String(right.boros_market_address ?? "").trim().toLowerCase() === market.borosMarketAddress;
-    if (leftExactBorosMarket !== rightExactBorosMarket) return leftExactBorosMarket ? -1 : 1;
-
-    const leftAssetVenue =
-      String(left.asset_symbol ?? "").trim().toUpperCase() === market.assetSymbol &&
-      String(left.venue ?? "").trim().toUpperCase() === market.venue.toUpperCase();
-    const rightAssetVenue =
-      String(right.asset_symbol ?? "").trim().toUpperCase() === market.assetSymbol &&
-      String(right.venue ?? "").trim().toUpperCase() === market.venue.toUpperCase();
-    if (leftAssetVenue !== rightAssetVenue) return leftAssetVenue ? -1 : 1;
-
-    return new Date(String(right.updated_at ?? 0)).getTime() - new Date(String(left.updated_at ?? 0)).getTime();
-  });
 
 const resolveLinkedUserId = async (
   supabase: SupabaseClient,
@@ -153,6 +103,46 @@ const resolveLinkedUserId = async (
   return typeof row?.user_id === "number" ? row.user_id : null;
 };
 
+const inferMarketId = (row: StrategyDbRow): MarketId | null => {
+  const asset = String(row.asset_symbol ?? "").trim().toUpperCase();
+  if (asset === "ETH") return "ETHUSDC";
+  if (asset === "BTC") return "BTCUSDC";
+  return null;
+};
+
+const mapRowsToPreferences = (rows: StrategyDbRow[]): StrategyPreferences => {
+  const base = normalizeStrategyPreferences(null);
+
+  for (const row of rows) {
+    const marketId = inferMarketId(row);
+    if (!marketId) continue;
+    const next = base.markets[marketId];
+    next.enabled = typeof row.market_enabled === "boolean" ? row.market_enabled : next.enabled;
+    next.mode =
+      row.primary_strategy_id === "dynamic_regime_hedge" || row.primary_strategy_id === "short_perp_fixed_lock"
+        ? "dynamic_regime_hedge"
+        : "default_hedge";
+    if (typeof row.entry_threshold_bp === "number" && Number.isFinite(row.entry_threshold_bp)) {
+      next.entryThresholdBp = Math.max(0, Math.round(row.entry_threshold_bp));
+    }
+    if (typeof row.exit_threshold_bp === "number" && Number.isFinite(row.exit_threshold_bp)) {
+      next.exitThresholdBp = Math.max(0, Math.round(row.exit_threshold_bp));
+    }
+    if (typeof row.ai_prompt === "string" && row.ai_prompt.trim().length > 0) {
+      base.aiPrompt = row.ai_prompt;
+    }
+    if (typeof row.codex_tokens === "number" && Number.isFinite(row.codex_tokens) && row.codex_tokens > 0) {
+      base.codexTokens = row.codex_tokens;
+    }
+  }
+
+  return base;
+};
+
+const findExistingMarketRow = (rows: StrategyDbRow[], marketId: MarketId): StrategyDbRow | null => {
+  return rows.find((row) => inferMarketId(row) === marketId && typeof row.id === "number") ?? null;
+};
+
 export async function GET(request: Request) {
   try {
     const supabase = resolveSupabaseClient();
@@ -162,12 +152,6 @@ export async function GET(request: Request) {
 
     const url = new URL(request.url);
     const walletAddress = String(url.searchParams.get("walletAddress") ?? "").trim().toLowerCase();
-    const market = resolveMarketContext({
-      marketKey: url.searchParams.get("marketKey"),
-      assetSymbol: url.searchParams.get("assetSymbol"),
-      venue: url.searchParams.get("venue"),
-      borosMarketAddress: url.searchParams.get("borosMarketAddress"),
-    });
     if (!isAddress(walletAddress)) {
       return NextResponse.json({ ok: false, error: "Invalid walletAddress." }, { status: 400 });
     }
@@ -184,18 +168,13 @@ export async function GET(request: Request) {
     }
 
     const rows = Array.isArray(data) ? (data as StrategyDbRow[]) : [];
-    const selected = sortStrategyRows(rows, market)[0] ?? null;
-
-    if (!selected) {
-      return NextResponse.json({ ok: true, preferences: null, updatedAt: null }, { status: 200 });
-    }
+    const preferences = rows.length > 0 ? mapRowsToPreferences(rows) : DEFAULT_STRATEGY_PREFERENCES;
 
     return NextResponse.json(
       {
         ok: true,
-        preferences: mapRowToPreferences(selected),
-        updatedAt: selected.updated_at,
-        market,
+        preferences,
+        updatedAt: rows[0]?.updated_at ?? null,
       },
       { status: 200 },
     );
@@ -215,16 +194,11 @@ export async function POST(request: Request) {
     const body = (await request.json()) as {
       walletAddress?: string;
       vaultAddress?: string | null;
-      marketKey?: string | null;
-      assetSymbol?: string | null;
-      venue?: string | null;
-      borosMarketAddress?: string | null;
       preferences?: Partial<StrategyPreferences>;
     };
 
     const walletAddress = String(body.walletAddress ?? "").trim().toLowerCase();
     const vaultAddressRaw = String(body.vaultAddress ?? "").trim().toLowerCase();
-    const market = resolveMarketContext(body);
     if (!isAddress(walletAddress)) {
       return NextResponse.json({ ok: false, error: "Invalid walletAddress." }, { status: 400 });
     }
@@ -236,68 +210,78 @@ export async function POST(request: Request) {
     const userId = await resolveLinkedUserId(supabase, walletAddress as Address);
     const updatedAt = new Date().toISOString();
 
-    const payload = {
-      user_id: userId,
-      wallet_address: walletAddress,
-      vault_address: vaultAddressRaw || null,
-      market_key: market.marketKey,
-      asset_symbol: market.assetSymbol,
-      venue: market.venue,
-      boros_market_address: market.borosMarketAddress,
-      primary_strategy_id: resolvePrimaryStrategyId(preferences),
-      enabled_strategies: preferences.enabled,
-      ai_prompt: preferences.aiPrompt,
-      codex_tokens: preferences.codexTokens,
-      updated_at: updatedAt,
-    };
-
-    let data: StrategyDbRow | null = null;
-    let error: Error | null = null;
-
-    const marketScopedWrite = await supabase
+    const existingRowsResult = await supabase
       .from(STRATEGY_TABLE)
-      .upsert(payload, { onConflict: "wallet_address,market_key" })
       .select("*")
-      .single();
+      .eq("wallet_address", walletAddress)
+      .order("updated_at", { ascending: false })
+      .limit(20);
 
-    if (marketScopedWrite.error) {
-      const legacyWrite = await supabase
-        .from(STRATEGY_TABLE)
-        .upsert(
-          {
-            user_id: payload.user_id,
-            wallet_address: payload.wallet_address,
-            vault_address: payload.vault_address,
-            primary_strategy_id: payload.primary_strategy_id,
-            enabled_strategies: payload.enabled_strategies,
-            ai_prompt: payload.ai_prompt,
-            codex_tokens: payload.codex_tokens,
-            updated_at: payload.updated_at,
-          },
-          { onConflict: "wallet_address" },
-        )
-        .select("*")
-        .single();
-
-      if (legacyWrite.error) {
-        error = new Error(`Supabase kyute_user_strategies upsert failed: ${legacyWrite.error.message}`);
-      } else {
-        data = legacyWrite.data as StrategyDbRow;
-      }
-    } else {
-      data = marketScopedWrite.data as StrategyDbRow;
+    if (existingRowsResult.error) {
+      throw new Error(
+        `Supabase kyute_user_strategies existing-row lookup failed: ${existingRowsResult.error.message}`,
+      );
     }
 
-    if (error || !data) {
-      throw error ?? new Error("Supabase kyute_user_strategies upsert returned no data.");
+    const existingRows = Array.isArray(existingRowsResult.data)
+      ? (existingRowsResult.data as StrategyDbRow[])
+      : [];
+
+    for (const marketId of STRATEGY_MARKETS) {
+      const metadata = DEFAULT_MARKET_METADATA[marketId];
+      const market = preferences.markets[marketId];
+      const payload = {
+        user_id: userId,
+        wallet_address: walletAddress,
+        vault_address: vaultAddressRaw || null,
+        market_key: metadata.marketKey,
+        asset_symbol: metadata.assetSymbol,
+        venue: DEFAULT_VENUE,
+        boros_market_address: metadata.borosMarketAddress,
+        primary_strategy_id: resolvePrimaryStrategyId(preferences, marketId),
+        enabled_strategies: market.enabled ? [market.mode] : [],
+        ai_prompt: preferences.aiPrompt,
+        codex_tokens: preferences.codexTokens,
+        market_enabled: market.enabled,
+        entry_threshold_bp: market.entryThresholdBp,
+        exit_threshold_bp: market.exitThresholdBp,
+        updated_at: updatedAt,
+      };
+
+      const existingRow = findExistingMarketRow(existingRows, marketId);
+      if (existingRow?.id) {
+        const updateResult = await supabase
+          .from(STRATEGY_TABLE)
+          .update(payload)
+          .eq("id", existingRow.id)
+          .select("*")
+          .single();
+
+        if (updateResult.error) {
+          throw new Error(
+            `Supabase kyute_user_strategies update failed for ${marketId}: ${updateResult.error.message}`,
+          );
+        }
+      } else {
+        const insertResult = await supabase
+          .from(STRATEGY_TABLE)
+          .insert(payload)
+          .select("*")
+          .single();
+
+        if (insertResult.error) {
+          throw new Error(
+            `Supabase kyute_user_strategies insert failed for ${marketId}: ${insertResult.error.message}`,
+          );
+        }
+      }
     }
 
     return NextResponse.json(
       {
         ok: true,
-        preferences: mapRowToPreferences(data),
-        updatedAt: data.updated_at,
-        market,
+        preferences,
+        updatedAt,
       },
       { status: 200 },
     );

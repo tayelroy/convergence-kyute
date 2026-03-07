@@ -20,6 +20,9 @@ export type StrategyConfigRecord = {
   assetSymbol?: string | null;
   venue?: string | null;
   borosMarketAddress?: Address;
+  marketEnabled: boolean;
+  entryThresholdBp?: number | null;
+  exitThresholdBp?: number | null;
   primaryStrategyId: string | null;
   enabledStrategies: StoredStrategyId[];
   aiPrompt?: string | null;
@@ -35,6 +38,9 @@ type StrategyDbRow = {
   asset_symbol?: string | null;
   venue?: string | null;
   boros_market_address?: string | null;
+  market_enabled?: boolean | null;
+  entry_threshold_bp?: number | null;
+  exit_threshold_bp?: number | null;
   primary_strategy_id: string | null;
   enabled_strategies: unknown;
   ai_prompt: string | null;
@@ -58,7 +64,10 @@ type ResolveUserHedgeModeParams = {
 };
 
 export type ResolvedUserHedgeMode = {
+  enabled: boolean;
   mode: HedgeMode;
+  entryThresholdBp?: number | null;
+  exitThresholdBp?: number | null;
   source: string;
   record: StrategyConfigRecord | null;
   warning?: string;
@@ -119,6 +128,15 @@ const mapDbRowToRecord = (row: StrategyDbRow): StrategyConfigRecord | null => {
     assetSymbol: typeof row.asset_symbol === "string" ? row.asset_symbol : null,
     venue: typeof row.venue === "string" ? row.venue : null,
     borosMarketAddress: row.boros_market_address ? (row.boros_market_address as Address) : undefined,
+    marketEnabled: typeof row.market_enabled === "boolean" ? row.market_enabled : true,
+    entryThresholdBp:
+      typeof row.entry_threshold_bp === "number" && Number.isFinite(row.entry_threshold_bp)
+        ? row.entry_threshold_bp
+        : null,
+    exitThresholdBp:
+      typeof row.exit_threshold_bp === "number" && Number.isFinite(row.exit_threshold_bp)
+        ? row.exit_threshold_bp
+        : null,
     primaryStrategyId: row.primary_strategy_id,
     enabledStrategies: parseEnabledStrategies(row.enabled_strategies),
     aiPrompt: row.ai_prompt,
@@ -263,28 +281,66 @@ export const mapFrontendStrategyToHedgeMode = (strategy: string | null | undefin
 
 export const resolveStrategyModeFromRecord = (
   record: StrategyConfigRecord | null,
-): { mode: HedgeMode | null; source: string; warning?: string } => {
+): {
+  enabled: boolean;
+  mode: HedgeMode | null;
+  entryThresholdBp?: number | null;
+  exitThresholdBp?: number | null;
+  source: string;
+  warning?: string;
+} => {
   if (!record) {
-    return { mode: null, source: "no_record" };
+    return { enabled: true, mode: null, source: "no_record" };
+  }
+
+  if (!record.marketEnabled) {
+    return {
+      enabled: false,
+      mode: null,
+      entryThresholdBp: record.entryThresholdBp,
+      exitThresholdBp: record.exitThresholdBp,
+      source: "db_market_disabled",
+    };
   }
 
   const primaryMode = mapFrontendStrategyToHedgeMode(record.primaryStrategyId);
   if (primaryMode) {
-    return { mode: primaryMode, source: `db_primary:${record.primaryStrategyId}` };
+    return {
+      enabled: true,
+      mode: primaryMode,
+      entryThresholdBp: record.entryThresholdBp,
+      exitThresholdBp: record.exitThresholdBp,
+      source: `db_primary:${record.primaryStrategyId}`,
+    };
   }
 
   for (const strategyId of record.enabledStrategies) {
     const candidateMode = mapFrontendStrategyToHedgeMode(strategyId);
     if (candidateMode === "lock_fixed") {
-      return { mode: candidateMode, source: `db_enabled:${strategyId}` };
+      return {
+        enabled: true,
+        mode: candidateMode,
+        entryThresholdBp: record.entryThresholdBp,
+        exitThresholdBp: record.exitThresholdBp,
+        source: `db_enabled:${strategyId}`,
+      };
     }
     if (candidateMode === "adverse_only") {
-      return { mode: candidateMode, source: `db_enabled:${strategyId}` };
+      return {
+        enabled: true,
+        mode: candidateMode,
+        entryThresholdBp: record.entryThresholdBp,
+        exitThresholdBp: record.exitThresholdBp,
+        source: `db_enabled:${strategyId}`,
+      };
     }
   }
 
   return {
+    enabled: true,
     mode: null,
+    entryThresholdBp: record.entryThresholdBp,
+    exitThresholdBp: record.exitThresholdBp,
     source: "unsupported_record",
     warning: `Strategy record for wallet=${record.walletAddress} has no live-executable strategy; falling back.`,
   };
@@ -298,8 +354,11 @@ export const resolveUserHedgeMode = async (
 
   if (!resolveSupabaseRestConfig({ supabaseUrl: params.supabaseUrl, supabaseKey: params.supabaseKey })) {
     return {
+      enabled: true,
       mode: fallbackMode,
       source: "supabase_unconfigured_fallback",
+      entryThresholdBp: null,
+      exitThresholdBp: null,
       record: null,
       warning: "Supabase not configured for strategy lookup.",
     };
@@ -316,12 +375,23 @@ export const resolveUserHedgeMode = async (
     if (recordsByUserId.length > 0) {
       const record = sortRecords(recordsByUserId, params)[0] ?? null;
       const resolved = resolveStrategyModeFromRecord(record);
-      if (resolved.mode) {
-        return { mode: resolved.mode, source: resolved.source, record, warning: resolved.warning };
+      if (resolved.mode || resolved.enabled === false) {
+        return {
+          enabled: resolved.enabled,
+          mode: resolved.mode ?? fallbackMode,
+          entryThresholdBp: resolved.entryThresholdBp,
+          exitThresholdBp: resolved.exitThresholdBp,
+          source: resolved.source,
+          record,
+          warning: resolved.warning,
+        };
       }
       if (resolved.warning) logger(`[strategy-config] ${resolved.warning}`);
       return {
+        enabled: true,
         mode: fallbackMode,
+        entryThresholdBp: resolved.entryThresholdBp,
+        exitThresholdBp: resolved.exitThresholdBp,
         source: "unsupported_record_fallback",
         record,
         warning: resolved.warning,
@@ -337,12 +407,23 @@ export const resolveUserHedgeMode = async (
       if (recordsByWallet.length > 0) {
         const record = sortRecords(recordsByWallet, params)[0] ?? null;
         const resolved = resolveStrategyModeFromRecord(record);
-        if (resolved.mode) {
-          return { mode: resolved.mode, source: resolved.source, record, warning: resolved.warning };
+        if (resolved.mode || resolved.enabled === false) {
+          return {
+            enabled: resolved.enabled,
+            mode: resolved.mode ?? fallbackMode,
+            entryThresholdBp: resolved.entryThresholdBp,
+            exitThresholdBp: resolved.exitThresholdBp,
+            source: resolved.source,
+            record,
+            warning: resolved.warning,
+          };
         }
         if (resolved.warning) logger(`[strategy-config] ${resolved.warning}`);
         return {
+          enabled: true,
           mode: fallbackMode,
+          entryThresholdBp: resolved.entryThresholdBp,
+          exitThresholdBp: resolved.exitThresholdBp,
           source: "unsupported_record_fallback",
           record,
           warning: resolved.warning,
@@ -351,7 +432,10 @@ export const resolveUserHedgeMode = async (
     }
 
     return {
+      enabled: true,
       mode: fallbackMode,
+      entryThresholdBp: null,
+      exitThresholdBp: null,
       source: "no_db_record_fallback",
       record: null,
     };
@@ -359,7 +443,10 @@ export const resolveUserHedgeMode = async (
     const message = error instanceof Error ? error.message : "Unknown strategy lookup error";
     logger(`[strategy-config] ${message}`);
     return {
+      enabled: true,
       mode: fallbackMode,
+      entryThresholdBp: null,
+      exitThresholdBp: null,
       source: "db_error_fallback",
       record: null,
       warning: message,
