@@ -12,6 +12,8 @@ type PositionPoint = {
 type PositionSide = "LONG" | "SHORT" | null;
 
 type DashboardState = {
+  assetSymbol: string;
+  pair: string;
   loading: boolean;
   error: string | null;
   midPrice: number | null;
@@ -23,6 +25,12 @@ type DashboardState = {
   positionSide: PositionSide;
   positionLastUpdate: number | null;
   historyPoints: PositionPoint[];
+};
+
+type UseHyperliquidDashboardOptions = {
+  coin?: string;
+  pair?: string;
+  borosMarketAddress?: string | null;
 };
 
 const isTestnet = () => {
@@ -79,10 +87,10 @@ const parseSpreadBpsFromL2Book = (data: unknown): number | null => {
 const parseCurrentOpenFromClearinghouse = (
   data: unknown,
   coin = "ETH",
-): { totalOpen: number; side: PositionSide } => {
+): { totalOpen: number; side: PositionSide; signedOpen: number } => {
   const root = data as { assetPositions?: Array<{ position?: { coin?: string; szi?: string | number } }> } | undefined;
   const arr = root?.assetPositions;
-  if (!Array.isArray(arr)) return { totalOpen: 0, side: null };
+  if (!Array.isArray(arr)) return { totalOpen: 0, side: null, signedOpen: 0 };
   const signedTotal = arr.reduce((acc, row) => {
     const c = String(row?.position?.coin ?? "");
     if (c !== coin) return acc;
@@ -91,12 +99,12 @@ const parseCurrentOpenFromClearinghouse = (
     return acc + szi;
   }, 0);
 
-  if (signedTotal > 0) return { totalOpen: signedTotal, side: "LONG" };
-  if (signedTotal < 0) return { totalOpen: Math.abs(signedTotal), side: "SHORT" };
-  return { totalOpen: 0, side: null };
+  if (signedTotal > 0) return { totalOpen: signedTotal, side: "LONG", signedOpen: signedTotal };
+  if (signedTotal < 0) return { totalOpen: Math.abs(signedTotal), side: "SHORT", signedOpen: signedTotal };
+  return { totalOpen: 0, side: null, signedOpen: 0 };
 };
 
-const cacheKey = (address: string) => `hl_dashboard_points_${address.toLowerCase()}`;
+const cacheKey = (address: string, coin: string) => `hl_dashboard_points_${coin.toLowerCase()}_${address.toLowerCase()}`;
 
 const inferWalletFromSessionCache = (): string | null => {
   if (typeof window === "undefined") return null;
@@ -105,7 +113,7 @@ const inferWalletFromSessionCache = (): string | null => {
       const key = window.sessionStorage.key(i);
       if (!key) continue;
       if (!key.startsWith("hl_dashboard_points_")) continue;
-      const address = key.replace("hl_dashboard_points_", "").trim();
+      const address = key.split("_").pop()?.trim() ?? "";
       if (/^0x[a-fA-F0-9]{40}$/.test(address)) return address.toLowerCase();
     }
   } catch {
@@ -114,10 +122,10 @@ const inferWalletFromSessionCache = (): string | null => {
   return null;
 };
 
-const fetchPersistedSeries = async (wallet: string, testnet: boolean): Promise<PositionPoint[]> => {
+const fetchPersistedSeries = async (wallet: string, testnet: boolean, coin: string): Promise<PositionPoint[]> => {
   const qs = new URLSearchParams({
     wallet,
-    coin: "ETH",
+    coin,
     testnet: testnet ? "true" : "false",
   });
   const response = await fetch(`/api/position-history?${qs.toString()}`);
@@ -133,9 +141,14 @@ const fetchPersistedSeries = async (wallet: string, testnet: boolean): Promise<P
     .filter((p) => Number.isFinite(p.timestamp) && Number.isFinite(p.totalOpen));
 };
 
-export function useHyperliquidDashboard() {
+export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions = {}) {
   const account = useActiveAccount();
+  const assetSymbol = String(options.coin ?? "ETH").trim().toUpperCase();
+  const pair = String(options.pair ?? `${assetSymbol}USDC`).trim().toUpperCase();
+  const borosMarketAddress = String(options.borosMarketAddress ?? "").trim().toLowerCase();
   const [state, setState] = useState<DashboardState>({
+    assetSymbol,
+    pair,
     loading: true,
     error: null,
     midPrice: null,
@@ -163,7 +176,7 @@ export function useHyperliquidDashboard() {
       // Hydrate from cached points to avoid blank graph during hard refreshes.
       if (wallet) {
         try {
-          const raw = sessionStorage.getItem(cacheKey(wallet));
+          const raw = sessionStorage.getItem(cacheKey(wallet, assetSymbol));
           if (raw) {
             const cached = JSON.parse(raw) as PositionPoint[];
             if (Array.isArray(cached) && cached.length > 0) {
@@ -186,7 +199,10 @@ export function useHyperliquidDashboard() {
         const [midsRaw, metaCtxRaw, ratesSyncRaw, l2BookRaw] = await Promise.all([
           relayInfo({ type: "allMids" }, testnet),
           relayInfo({ type: "metaAndAssetCtxs" }, testnet),
-          fetch("/api/rates-sync").then(async (res) => {
+          fetch(`/api/rates-sync?${new URLSearchParams({
+            coin: assetSymbol,
+            ...(borosMarketAddress ? { marketAddress: borosMarketAddress } : {}),
+          }).toString()}`).then(async (res) => {
             const body = (await res.json()) as {
               ok: boolean;
               error?: string;
@@ -198,21 +214,21 @@ export function useHyperliquidDashboard() {
             }
             return body;
           }),
-          relayInfo({ type: "l2Book", coin: "ETH" }, false),
+          relayInfo({ type: "l2Book", coin: assetSymbol }, false),
         ]);
 
         const mids = midsRaw as Record<string, string>;
-        const midPrice = toNumber(mids.ETH);
+        const midPrice = toNumber(mids[assetSymbol]);
 
         const [, assetCtxs] = metaCtxRaw as [
           { universe: Array<{ name: string }> },
           Array<{ markPx?: string; prevDayPx?: string }>,
         ];
         const [meta] = metaCtxRaw as [{ universe: Array<{ name: string }> }, unknown[]];
-        const ethIndex = meta.universe.findIndex((u) => u.name === "ETH");
-        const ethCtx = ethIndex >= 0 ? assetCtxs[ethIndex] : undefined;
-        const mark = toNumber(ethCtx?.markPx);
-        const prev = toNumber(ethCtx?.prevDayPx);
+        const assetIndex = meta.universe.findIndex((u) => u.name === assetSymbol);
+        const assetCtx = assetIndex >= 0 ? assetCtxs[assetIndex] : undefined;
+        const mark = toNumber(assetCtx?.markPx);
+        const prev = toNumber(assetCtx?.prevDayPx);
         const midChangePct = mark != null && prev != null && prev > 0 ? ((mark - prev) / prev) * 100 : null;
 
         const hlFundingApr = toNumber(ratesSyncRaw.funding?.funding_apr);
@@ -225,35 +241,41 @@ export function useHyperliquidDashboard() {
 
         if (wallet) {
           const [persistedResult, clearinghouseResult] = await Promise.allSettled([
-            fetchPersistedSeries(wallet, testnet),
+            fetchPersistedSeries(wallet, testnet, assetSymbol),
             relayInfo({ type: "clearinghouseState", user: wallet }, testnet),
           ]);
           if (persistedResult.status === "fulfilled") {
             historyPoints = persistedResult.value;
           }
           if (clearinghouseResult.status === "fulfilled") {
-            const currentPosition = parseCurrentOpenFromClearinghouse(clearinghouseResult.value, "ETH");
+            const currentPosition = parseCurrentOpenFromClearinghouse(clearinghouseResult.value, assetSymbol);
             const currentOpen = currentPosition.totalOpen;
             positionSide = currentPosition.side;
             positionLastUpdate = Date.now();
             if (historyPoints.length === 0 && currentOpen > 0) {
-              historyPoints = [{ timestamp: Date.now(), totalOpen: currentOpen }];
+              historyPoints = [{ timestamp: Date.now(), totalOpen: currentPosition.signedOpen }];
+            }
+            if (historyPoints.length > 0) {
+              const last = historyPoints[historyPoints.length - 1];
+              if (Math.abs(last.totalOpen - currentPosition.signedOpen) > 1e-9) {
+                historyPoints = [...historyPoints, { timestamp: Date.now(), totalOpen: currentPosition.signedOpen }];
+              }
             }
             totalOpenNow =
               currentOpen > 0
                 ? currentOpen
                 : historyPoints.length > 0
-                ? historyPoints[historyPoints.length - 1].totalOpen
+                ? Math.abs(historyPoints[historyPoints.length - 1].totalOpen)
                 : 0;
           } else {
-            totalOpenNow = historyPoints.length > 0 ? historyPoints[historyPoints.length - 1].totalOpen : 0;
+            totalOpenNow = historyPoints.length > 0 ? Math.abs(historyPoints[historyPoints.length - 1].totalOpen) : 0;
           }
           if (positionLastUpdate == null && historyPoints.length > 0) {
             positionLastUpdate = historyPoints[historyPoints.length - 1].timestamp;
           }
 
           try {
-            sessionStorage.setItem(cacheKey(wallet), JSON.stringify(historyPoints));
+            sessionStorage.setItem(cacheKey(wallet, assetSymbol), JSON.stringify(historyPoints));
           } catch {
             // ignore storage failures
           }
@@ -261,6 +283,8 @@ export function useHyperliquidDashboard() {
 
         if (!cancelled) {
           setState({
+            assetSymbol,
+            pair,
             loading: false,
             error: null,
             midPrice,
@@ -277,7 +301,7 @@ export function useHyperliquidDashboard() {
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to fetch Hyperliquid dashboard data";
         if (!cancelled) {
-          setState((s) => ({ ...s, loading: false, error: message }));
+          setState((s) => ({ ...s, assetSymbol, pair, loading: false, error: message }));
         }
       }
     };
@@ -288,7 +312,7 @@ export function useHyperliquidDashboard() {
       cancelled = true;
       clearInterval(id);
     };
-  }, [account?.address]);
+  }, [account?.address, assetSymbol, borosMarketAddress, pair]);
 
   return useMemo(() => state, [state]);
 }

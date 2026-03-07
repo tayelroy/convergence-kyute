@@ -3,7 +3,7 @@
 import { useMemo } from "react";
 import { getContract } from "thirdweb";
 import { useReadContract } from "thirdweb/react";
-import { formatUnits } from "viem";
+import { type Address, formatUnits } from "viem";
 import { kyuteVaultChain } from "@/lib/chains";
 import { client } from "@/lib/thirdweb";
 import { getKyuteVaultAddress, VAULT_ABI } from "@/lib/kyute-vault";
@@ -24,7 +24,7 @@ type RawVaultPosition = readonly [
   boolean,
 ];
 
-export function useKyuteVaultState(userAddress?: string) {
+export function useKyuteVaultState(userAddress?: string, yuToken?: Address) {
   const vaultAddress = getKyuteVaultAddress();
   const vaultContract = useMemo(() => {
     if (!client || !vaultAddress) return null;
@@ -61,10 +61,17 @@ export function useKyuteVaultState(userAddress?: string) {
     contract: vaultContract!,
     method: "userPositions",
     params: [userAddress ?? ZERO_ADDRESS],
-    queryOptions: { enabled: Boolean(vaultContract && userAddress) },
+    queryOptions: { enabled: Boolean(vaultContract && userAddress && !yuToken) },
   });
 
-  const position = (userPositionData ?? null) as RawVaultPosition | null;
+  const { data: userMarketPositionData } = useReadContract({
+    contract: vaultContract!,
+    method: "userMarketPositions",
+    params: [userAddress ?? ZERO_ADDRESS, yuToken ?? ZERO_ADDRESS],
+    queryOptions: { enabled: Boolean(vaultContract && userAddress && yuToken) },
+  });
+
+  const position = ((yuToken ? userMarketPositionData : userPositionData) ?? null) as RawVaultPosition | null;
   const totalAssetsWei = (totalAssetsData as bigint | undefined) ?? BigInt(0);
   const userAssetsWei = (userAssetsData as bigint | undefined) ?? BigInt(0);
   const sharesWei = (sharesData as bigint | undefined) ?? BigInt(0);
