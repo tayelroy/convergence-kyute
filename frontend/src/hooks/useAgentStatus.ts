@@ -111,7 +111,7 @@ export function useAgentStatus() {
 
         async function fetchStatus() {
             try {
-                const res = await fetch("/api/agent-status");
+                const res = await fetch("/api/agent-status", { cache: "no-store" });
                 if (!res.ok) throw new Error(`Status ${res.status}`);
                 const json = (await res.json()) as AgentStatusResponse;
                 if (!cancelled) {

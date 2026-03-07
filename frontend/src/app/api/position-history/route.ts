@@ -1,6 +1,9 @@
 import { NextResponse } from "next/server";
 import { createClient } from "@supabase/supabase-js";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 type Fill = {
   coin?: string;
   side?: "B" | "A";
@@ -48,6 +51,7 @@ const fetchFillsByTime = async (wallet: string, testnet: boolean): Promise<Fill[
   const startTime = now - 30 * 24 * 60 * 60 * 1000;
   const response = await fetch(`${baseUrl}/info`, {
     method: "POST",
+    cache: "no-store",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       type: "userFillsByTime",
@@ -67,6 +71,7 @@ const fetchCurrentOpen = async (wallet: string, testnet: boolean, coin: string):
   const baseUrl = testnet ? "https://api.hyperliquid-testnet.xyz" : "https://api.hyperliquid.xyz";
   const response = await fetch(`${baseUrl}/info`, {
     method: "POST",
+    cache: "no-store",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       type: "clearinghouseState",
@@ -127,7 +132,7 @@ export async function GET(request: Request) {
 
     const pointsFromDb = (existing ?? []) as Point[];
     const latestTs = pointsFromDb.length > 0 ? new Date(pointsFromDb[pointsFromDb.length - 1].timestamp).getTime() : 0;
-    const isFresh = latestTs > Date.now() - 5 * 60 * 1000;
+    const isFresh = latestTs > Date.now() - 60 * 1000;
 
     if (isFresh && pointsFromDb.length > 0) {
       return NextResponse.json({ ok: true, source: "supabase-cache", points: pointsFromDb });

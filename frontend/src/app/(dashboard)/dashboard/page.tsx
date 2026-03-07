@@ -8,7 +8,6 @@ import { TickerTape } from "@/components/dashboard/TickerTape";
 import { SavingsPortfolio } from "@/components/dashboard/SavingsPortfolio";
 import { YieldRiskGauge } from "@/components/dashboard/YieldRiskGauge";
 import { ExecutionConsole } from "@/components/dashboard/ExecutionConsole";
-import { UserPositionHistoryChart } from "@/components/dashboard/UserPositionHistoryChart";
 import { BorosHedgeChart } from "@/components/dashboard/BorosHedgeChart";
 import { useAgentStatus } from "@/hooks/useAgentStatus";
 import { useHyperliquidDashboard } from "@/hooks/use-hyperliquid-dashboard";
@@ -27,6 +26,7 @@ const MARKET_CONFIGS = [
     pair: "ETHUSDC",
     title: "ETH / USDC",
     yuToken: DEFAULT_MARKET_YU_TOKENS.ETH,
+    borosMarketId: 41,
     borosMarketAddress: String(process.env.NEXT_PUBLIC_BOROS_MARKET_ADDRESS ?? "").trim().toLowerCase() || null,
   },
   {
@@ -34,6 +34,7 @@ const MARKET_CONFIGS = [
     pair: "BTCUSDC",
     title: "BTC / USDC",
     yuToken: DEFAULT_MARKET_YU_TOKENS.BTC,
+    borosMarketId: 61,
     borosMarketAddress: String(process.env.NEXT_PUBLIC_BOROS_BTC_MARKET_ADDRESS ?? "").trim().toLowerCase() || null,
   },
 ] as const;
@@ -116,21 +117,25 @@ export default function DashboardPage() {
     lastUpdated,
   } = useAgentStatus();
 
-  const ethLive = useHyperliquidDashboard({
-    coin: "ETH",
-    pair: "ETHUSDC",
-    borosMarketAddress: MARKET_CONFIGS[0].borosMarketAddress,
-  });
-  const btcLive = useHyperliquidDashboard({
-    coin: "BTC",
-    pair: "BTCUSDC",
-    borosMarketAddress: MARKET_CONFIGS[1].borosMarketAddress,
-  });
-
   const borosWallet = useMemo(() => {
     if (canonicalWalletFromEnv) return canonicalWalletFromEnv;
     return account?.address ?? getCachedWalletAddress() ?? undefined;
   }, [account?.address]);
+
+  const ethLive = useHyperliquidDashboard({
+    coin: "ETH",
+    pair: "ETHUSDC",
+    borosMarketId: MARKET_CONFIGS[0].borosMarketId,
+    borosMarketAddress: MARKET_CONFIGS[0].borosMarketAddress,
+    walletAddress: borosWallet,
+  });
+  const btcLive = useHyperliquidDashboard({
+    coin: "BTC",
+    pair: "BTCUSDC",
+    borosMarketId: MARKET_CONFIGS[1].borosMarketId,
+    borosMarketAddress: MARKET_CONFIGS[1].borosMarketAddress,
+    walletAddress: borosWallet,
+  });
 
   const ethVault = useKyuteVaultState(borosWallet, DEFAULT_MARKET_YU_TOKENS.ETH);
   const btcVault = useKyuteVaultState(borosWallet, DEFAULT_MARKET_YU_TOKENS.BTC);
