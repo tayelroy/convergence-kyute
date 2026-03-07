@@ -11,11 +11,27 @@ type PositionPoint = {
 
 type PositionSide = "LONG" | "SHORT" | null;
 
+type HedgeDecisionDebug = {
+  exposure: string | null;
+  shouldHedge: boolean | null;
+  targetHedgeIsLong: boolean | null;
+  edgeBp: number | null;
+  reason: string | null;
+  action: string | null;
+  executeNeeded: boolean | null;
+  entryThresholdBp: number | null;
+  exitThresholdBp: number | null;
+  enabled: boolean | null;
+  mode: string | null;
+};
+
 type DashboardState = {
   assetSymbol: string;
   pair: string;
   loading: boolean;
   error: string | null;
+  ratesSource: string | null;
+  ratesSourceLabel: string | null;
   midPrice: number | null;
   hlFundingApr: number | null;
   hlSpreadBps: number | null;
@@ -25,6 +41,7 @@ type DashboardState = {
   positionSide: PositionSide;
   positionLastUpdate: number | null;
   historyPoints: PositionPoint[];
+  hedgeDecision: HedgeDecisionDebug | null;
 };
 
 type UseHyperliquidDashboardOptions = {
@@ -158,6 +175,8 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
     pair,
     loading: true,
     error: null,
+    ratesSource: null,
+    ratesSourceLabel: null,
     midPrice: null,
     hlFundingApr: null,
     hlSpreadBps: null,
@@ -167,6 +186,7 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
     positionSide: null,
     positionLastUpdate: null,
     historyPoints: [],
+    hedgeDecision: null,
   });
 
   useEffect(() => {
@@ -219,8 +239,22 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
             const body = (await res.json()) as {
               ok: boolean;
               error?: string;
-              funding?: { funding_apr?: number };
-              boros?: { implied_apr?: number };
+              source?: string;
+              funding?: { funding_apr?: number; source?: string };
+              boros?: { implied_apr?: number; source?: string };
+              decision?: {
+                exposure?: string;
+                shouldHedge?: boolean;
+                targetHedgeIsLong?: boolean;
+                edgeBp?: number;
+                reason?: string;
+                action?: string;
+                executeNeeded?: boolean;
+                entryThresholdBp?: number;
+                exitThresholdBp?: number;
+                enabled?: boolean;
+                mode?: string;
+              } | null;
             };
             if (!res.ok || !body.ok) {
               throw new Error(body.error ?? `rates-sync failed (${res.status})`);
@@ -247,6 +281,34 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
         const hlFundingApr = toNumber(ratesSyncRaw.funding?.funding_apr);
         const hlSpreadBps = parseSpreadBpsFromL2Book(l2BookRaw);
         const borosImpliedApr = toNumber(ratesSyncRaw.boros?.implied_apr);
+        const ratesSource = String(
+          ratesSyncRaw.source ??
+            ratesSyncRaw.boros?.source ??
+            ratesSyncRaw.funding?.source ??
+            "agent_sidecar_snapshot",
+        ).trim();
+        const ratesSourceLabel =
+          ratesSource === "agent_sidecar_snapshot" ? "SIDECAR LIVE" : ratesSource.toUpperCase().replace(/_/g, " ");
+        const hedgeDecision = ratesSyncRaw.decision
+          ? {
+              exposure: typeof ratesSyncRaw.decision.exposure === "string" ? ratesSyncRaw.decision.exposure : null,
+              shouldHedge:
+                typeof ratesSyncRaw.decision.shouldHedge === "boolean" ? ratesSyncRaw.decision.shouldHedge : null,
+              targetHedgeIsLong:
+                typeof ratesSyncRaw.decision.targetHedgeIsLong === "boolean"
+                  ? ratesSyncRaw.decision.targetHedgeIsLong
+                  : null,
+              edgeBp: toNumber(ratesSyncRaw.decision.edgeBp),
+              reason: typeof ratesSyncRaw.decision.reason === "string" ? ratesSyncRaw.decision.reason : null,
+              action: typeof ratesSyncRaw.decision.action === "string" ? ratesSyncRaw.decision.action : null,
+              executeNeeded:
+                typeof ratesSyncRaw.decision.executeNeeded === "boolean" ? ratesSyncRaw.decision.executeNeeded : null,
+              entryThresholdBp: toNumber(ratesSyncRaw.decision.entryThresholdBp),
+              exitThresholdBp: toNumber(ratesSyncRaw.decision.exitThresholdBp),
+              enabled: typeof ratesSyncRaw.decision.enabled === "boolean" ? ratesSyncRaw.decision.enabled : null,
+              mode: typeof ratesSyncRaw.decision.mode === "string" ? ratesSyncRaw.decision.mode : null,
+            }
+          : null;
         let historyPoints: PositionPoint[] = [];
         let totalOpenNow = 0;
         let positionSide: PositionSide = null;
@@ -300,6 +362,8 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
             pair,
             loading: false,
             error: null,
+            ratesSource,
+            ratesSourceLabel,
             midPrice,
             hlFundingApr,
             hlSpreadBps,
@@ -309,12 +373,22 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
             positionSide,
             positionLastUpdate,
             historyPoints,
+            hedgeDecision,
           });
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : "Failed to fetch Hyperliquid dashboard data";
         if (!cancelled) {
-          setState((s) => ({ ...s, assetSymbol, pair, loading: false, error: message }));
+          setState((s) => ({
+            ...s,
+            assetSymbol,
+            pair,
+            loading: false,
+            error: message,
+            ratesSource: "agent_sidecar_snapshot",
+            ratesSourceLabel: "SIDECAR OFFLINE",
+            hedgeDecision: null,
+          }));
         }
       }
     };

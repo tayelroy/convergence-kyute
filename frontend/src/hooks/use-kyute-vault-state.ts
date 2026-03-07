@@ -1,96 +1,98 @@
 "use client";
 
-import { useMemo } from "react";
-import { getContract } from "thirdweb";
-import { useReadContract } from "thirdweb/react";
-import { type Address, formatUnits } from "viem";
-import { kyuteVaultChain } from "@/lib/chains";
-import { client } from "@/lib/thirdweb";
-import { getKyuteVaultAddress, VAULT_ABI } from "@/lib/kyute-vault";
+import { useEffect, useMemo, useState } from "react";
+import type { Address } from "viem";
 
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+type VaultStateResponse = {
+  ok: boolean;
+  error?: string;
+  vaultAddress?: string;
+  totalAssetsWei?: string;
+  totalAssetsEth?: number;
+  userAssetsWei?: string;
+  userAssetsEth?: number;
+  sharesWei?: string;
+  hasPosition?: boolean;
+  hasBorosHedge?: boolean;
+  hlNotionalWei?: string;
+  hlNotionalEth?: number;
+  currentHedgeNotionalWei?: string;
+  currentHedgeAmountYu?: number;
+  currentHedgeIsLong?: boolean;
+  positionLastUpdate?: number | null;
+  yuToken?: string;
+};
 
-type RawVaultPosition = readonly [
-  string,
-  boolean,
-  bigint,
-  bigint,
-  boolean,
-  string,
-  bigint,
-  bigint,
-  bigint,
-  boolean,
-  boolean,
-];
+const ZERO = BigInt(0);
 
 export function useKyuteVaultState(userAddress?: string, yuToken?: Address) {
-  const vaultAddress = getKyuteVaultAddress();
-  const vaultContract = useMemo(() => {
-    if (!client || !vaultAddress) return null;
-    return getContract({
-      client,
-      address: vaultAddress,
-      chain: kyuteVaultChain,
-      abi: VAULT_ABI,
-    });
-  }, [vaultAddress]);
+  const [state, setState] = useState<VaultStateResponse | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  const { data: totalAssetsData } = useReadContract({
-    contract: vaultContract!,
-    method: "totalAssets",
-    params: [],
-    queryOptions: { enabled: Boolean(vaultContract) },
-  });
+  useEffect(() => {
+    let cancelled = false;
 
-  const { data: sharesData } = useReadContract({
-    contract: vaultContract!,
-    method: "balanceOf",
-    params: [userAddress ?? ZERO_ADDRESS],
-    queryOptions: { enabled: Boolean(vaultContract && userAddress) },
-  });
+    const run = async () => {
+      try {
+        const params = new URLSearchParams();
+        if (userAddress) params.set("walletAddress", userAddress);
+        if (yuToken) params.set("yuToken", yuToken);
+        const res = await fetch(`/api/vault-state?${params.toString()}`, {
+          cache: "no-store",
+        });
+        const body = (await res.json()) as VaultStateResponse;
+        if (!res.ok || !body.ok) {
+          throw new Error(body.error ?? `vault-state failed (${res.status})`);
+        }
+        if (!cancelled) {
+          setState(body);
+        }
+      } catch (error) {
+        if (!cancelled) {
+          setState({
+            ok: false,
+            error: error instanceof Error ? error.message : "vault-state unavailable",
+          });
+        }
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    };
 
-  const { data: userAssetsData } = useReadContract({
-    contract: vaultContract!,
-    method: "convertToAssets",
-    params: [sharesData ?? BigInt(0)],
-    queryOptions: { enabled: Boolean(vaultContract && userAddress && sharesData !== undefined) },
-  });
+    void run();
+    const id = setInterval(() => void run(), 15_000);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [userAddress, yuToken]);
 
-  const { data: userPositionData } = useReadContract({
-    contract: vaultContract!,
-    method: "userPositions",
-    params: [userAddress ?? ZERO_ADDRESS],
-    queryOptions: { enabled: Boolean(vaultContract && userAddress && !yuToken) },
-  });
+  return useMemo(() => {
+    const totalAssetsWei = BigInt(state?.totalAssetsWei ?? "0");
+    const userAssetsWei = BigInt(state?.userAssetsWei ?? "0");
+    const sharesWei = BigInt(state?.sharesWei ?? "0");
+    const hlNotionalWei = BigInt(state?.hlNotionalWei ?? "0");
+    const currentHedgeNotionalWei = BigInt(state?.currentHedgeNotionalWei ?? "0");
 
-  const { data: userMarketPositionData } = useReadContract({
-    contract: vaultContract!,
-    method: "userMarketPositions",
-    params: [userAddress ?? ZERO_ADDRESS, yuToken ?? ZERO_ADDRESS],
-    queryOptions: { enabled: Boolean(vaultContract && userAddress && yuToken) },
-  });
-
-  const position = ((yuToken ? userMarketPositionData : userPositionData) ?? null) as RawVaultPosition | null;
-  const totalAssetsWei = (totalAssetsData as bigint | undefined) ?? BigInt(0);
-  const userAssetsWei = (userAssetsData as bigint | undefined) ?? BigInt(0);
-  const sharesWei = (sharesData as bigint | undefined) ?? BigInt(0);
-
-  return {
-    configured: Boolean(vaultContract && vaultAddress),
-    vaultAddress,
-    totalAssetsWei,
-    totalAssetsEth: Number(formatUnits(totalAssetsWei, 18)),
-    userAssetsWei,
-    userAssetsEth: Number(formatUnits(userAssetsWei, 18)),
-    sharesWei,
-    hasPosition: Boolean(position && position[2] > BigInt(0)),
-    hasBorosHedge: Boolean(position && position[4]),
-    hlNotionalWei: position?.[2] ?? BigInt(0),
-    hlNotionalEth: Number(formatUnits(position?.[2] ?? BigInt(0), 18)),
-    currentHedgeNotionalWei: position?.[8] ?? BigInt(0),
-    currentHedgeAmountYu: Number(formatUnits(position?.[8] ?? BigInt(0), 18)),
-    currentHedgeIsLong: position?.[9] ?? false,
-    positionLastUpdate: position?.[6] ? Number(position[6]) * 1000 : null,
-  };
+    return {
+      configured: Boolean(state?.ok && state?.vaultAddress),
+      loading,
+      error: state?.ok === false ? state.error ?? null : null,
+      vaultAddress: state?.vaultAddress,
+      totalAssetsWei,
+      totalAssetsEth: Number(state?.totalAssetsEth ?? 0),
+      userAssetsWei,
+      userAssetsEth: Number(state?.userAssetsEth ?? 0),
+      sharesWei,
+      hasPosition: Boolean(state?.hasPosition),
+      hasBorosHedge: Boolean(state?.hasBorosHedge),
+      hlNotionalWei: hlNotionalWei ?? ZERO,
+      hlNotionalEth: Number(state?.hlNotionalEth ?? 0),
+      currentHedgeNotionalWei: currentHedgeNotionalWei ?? ZERO,
+      currentHedgeAmountYu: Number(state?.currentHedgeAmountYu ?? 0),
+      currentHedgeIsLong: Boolean(state?.currentHedgeIsLong),
+      positionLastUpdate: state?.positionLastUpdate ?? null,
+      yuToken: state?.yuToken ?? null,
+    };
+  }, [loading, state]);
 }

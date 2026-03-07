@@ -13,6 +13,7 @@ CONTRACTS_DIR="${ROOT_DIR}/../contracts"
 CONTRACTS_ENV_FILE="${CONTRACTS_DIR}/.env"
 KYUTE_STAGING_CONFIG="${CRE_DIR}/kyute-agent/config.staging.json"
 FRONTEND_ENV_LOCAL="${ROOT_DIR}/../frontend/.env.local"
+CRE_LOG_PATH="/tmp/kyute_cre.log"
 ANVIL_DEPLOYER="0xf39fd6e51aad88f6f4ce6ab8827279cfffb92266"
 DEFAULT_FORK_URL="https://arb1.arbitrum.io/rpc"
 DEMO_USER_ID_DEFAULT=123
@@ -120,6 +121,7 @@ FORK_BLOCK_NUMBER="${FORK_BLOCK_NUMBER:-}"
 DEMO_NO_FORK="${DEMO_NO_FORK:-true}"
 DEMO_USER_ID="${DEMO_USER_ID:-${DEMO_USER_ID_DEFAULT}}"
 DEMO_EXEC_MODE="${DEMO_EXEC_MODE:-cre}"
+DEMO_CLEAN_CRE_OUTPUT="${DEMO_CLEAN_CRE_OUTPUT:-true}"
 DEMO_POSITION_NOTIONAL_WEI="${DEMO_POSITION_NOTIONAL_WEI:-${DEMO_POSITION_NOTIONAL_WEI_DEFAULT}}"
 DEMO_HL_POSITION_TESTNET="${DEMO_HL_POSITION_TESTNET:-true}"
 export ANVIL_RPC_URL="${DEMO_RPC_URL}"
@@ -530,6 +532,20 @@ if ! kill -0 "${AGENT_SIDECAR_PID}" 2>/dev/null; then
     tail -n 40 /tmp/kyute_agent_sidecar.log || true
     exit 1
 fi
+sidecar_health_url="${KYUTE_AGENT_SIDECAR_URL%/}/health"
+sidecar_ready=false
+for _ in $(seq 1 10); do
+    if curl -fsS "${sidecar_health_url}" > /dev/null 2>&1; then
+        sidecar_ready=true
+        break
+    fi
+    sleep 1
+done
+if [ "${sidecar_ready}" != "true" ]; then
+    echo "   ✗ Agent sidecar failed health check at ${sidecar_health_url}. Last lines from /tmp/kyute_agent_sidecar.log:"
+    tail -n 40 /tmp/kyute_agent_sidecar.log || true
+    exit 1
+fi
 echo "   ✓ Agent sidecar running at ${KYUTE_AGENT_SIDECAR_URL} (PID: ${AGENT_SIDECAR_PID})"
 echo "Waiting 5 seconds for initial Supabase data population..."
 sleep 5
@@ -541,13 +557,42 @@ echo "   • mode=${DEMO_EXEC_MODE}"
 echo "   Press Ctrl+C at any time to safely shut down."
 echo ""
 
+run_cre_cycle() {
+    : > "${CRE_LOG_PATH}"
+    if [ "${DEMO_CLEAN_CRE_OUTPUT}" != "true" ]; then
+        cre workflow simulate ./kyute-agent --target=staging-settings | tee "${CRE_LOG_PATH}"
+        return
+    fi
+
+    cre workflow simulate ./kyute-agent --target=staging-settings 2>&1 \
+        | tee "${CRE_LOG_PATH}" \
+        | awk '
+            BEGIN { show_result = 0 }
+            /^✓ Workflow compiled$/ { print; next }
+            /^✗/ { print; next }
+            /^Failed to/ { print; next }
+            /^Build failed:/ { print; next }
+            /^\xE2\x9C\x97/ { print; next }
+            /^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* \[SIMULATION\] (Simulator Initialized|Running trigger.*|Execution finished signal received|Skipping WorkflowEngineV2)/ { print; next }
+            /^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* \[WORKFLOW\] WorkflowExecution(Start|Finish)/ { print; next }
+            /^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* \[USER LOG\]/ { print; next }
+            /^✓ Workflow Simulation Result:/ { print; show_result = 1; next }
+            show_result == 1 {
+                if (NF == 0) next
+                print
+                show_result = 0
+                next
+            }
+        '
+}
+
 while true; do
     echo "======================================================"
     echo "[$(date +'%T')] Triggering CRE Execution..."
     echo "======================================================"
 
     if [ "${DEMO_EXEC_MODE}" = "cre" ]; then
-        cre workflow simulate ./kyute-agent --target=staging-settings
+        run_cre_cycle
     else
         bun run direct-hedge-cycle.ts
     fi

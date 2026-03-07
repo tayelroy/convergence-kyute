@@ -104,14 +104,13 @@ export function useHlOpenPosition(address?: string): UseHlOpenPositionResult {
         }),
       });
 
+      const envelope = (await response.json()) as { ok: boolean; data?: unknown; error?: string; status?: number };
       if (!response.ok) {
-        const body = await response.text();
-        throw new Error(`Hyperliquid relay query failed: ${response.status} ${body}`);
+        throw new Error(envelope.error ?? `Hyperliquid relay query failed: ${response.status}`);
       }
 
-      const envelope = (await response.json()) as { ok: boolean; data?: unknown };
       if (!envelope.ok) {
-        throw new Error("Hyperliquid relay returned non-ok response");
+        throw new Error(envelope.error ?? "Hyperliquid relay returned non-ok response");
       }
       const parsedPositions = parsePositions(envelope.data);
       if (parsedPositions.length > 0) {

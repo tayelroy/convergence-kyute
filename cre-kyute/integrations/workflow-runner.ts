@@ -361,8 +361,8 @@ export const runKyuteWorkflowCycle = async (
   log: Logger = console.log,
 ): Promise<WorkflowRunnerResult> => {
   const chainId = config.chainId ?? DEFAULT_CHAIN_ID;
-  const entryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
-  const exitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
+  const configuredEntryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
+  const configuredExitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
   const windowHours = config.windowHours ?? WINDOW_HOURS;
   const hlFundingUrl = resolveHlUrl(config, "funding");
   const hlPositionUrl = resolveHlUrl(config, "position");
@@ -407,12 +407,17 @@ export const runKyuteWorkflowCycle = async (
     logger: (message) => log(`[workflow-runner] ${message}`),
   });
   const hedgeMode = strategyMode.mode;
-  log(`[workflow-runner] using strategy mode ${hedgeMode} from ${strategyMode.source}`);
+  const strategyEnabled = strategyMode.enabled;
+  const entryThresholdBp = strategyMode.entryThresholdBp ?? configuredEntryThresholdBp;
+  const exitThresholdBp = strategyMode.exitThresholdBp ?? configuredExitThresholdBp;
+  log(
+    `[workflow-runner] using strategy mode ${hedgeMode} enabled=${strategyEnabled} entryBp=${entryThresholdBp} exitBp=${exitThresholdBp} from ${strategyMode.source}`,
+  );
   if (strategyMode.warning) {
     log(`[workflow-runner] strategy mode warning: ${strategyMode.warning}`);
   }
 
-  const decision = computeHedgePolicy({
+  const baseDecision = computeHedgePolicy({
     positionSide: position.positionSide,
     borosImpliedAprBp: borosAprBp,
     confidenceBp,
@@ -425,6 +430,13 @@ export const runKyuteWorkflowCycle = async (
     oiFeeBp: borosOiFeeBp,
     mode: hedgeMode,
   });
+  const decision = strategyEnabled
+    ? baseDecision
+    : {
+        ...baseDecision,
+        shouldHedge: false,
+        reason: `market disabled by saved strategy config source=${strategyMode.source}`,
+      };
   const shouldHedge = decision.shouldHedge;
   const predictedAprBp = Math.round(decision.carrySourceAprBp);
   const contractBorosAprBp = Math.round(decision.carryCostAprBp);

@@ -94,7 +94,7 @@ function Header1() {
                                                         {item.description}
                                                     </p>
                                                 </div>
-                                                <GradientButton size="sm" variant="variant" className="mt-10 border-0">
+                                                <GradientButton variant="variant" className="mt-10 min-w-0 px-4 py-2 text-sm leading-none border-0">
                                                     View Docs
                                                 </GradientButton>
                                             </div>
