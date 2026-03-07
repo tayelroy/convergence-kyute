@@ -43,14 +43,9 @@ const readFiniteNumber = (value: unknown): number | null => {
 };
 
 const selectMarketApr = (market: any): number => {
-  const ammImpliedApr = readFiniteNumber(market?.data?.ammImpliedApr);
-  if (ammImpliedApr !== null && ammImpliedApr > 0) {
-    return ammImpliedApr;
-  }
-
   const fallbacks = [
-    readFiniteNumber(market?.data?.midApr),
     readFiniteNumber(market?.data?.markApr),
+    readFiniteNumber(market?.data?.midApr),
     readFiniteNumber(market?.data?.lastTradedApr),
   ];
 
