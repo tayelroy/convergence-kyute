@@ -5,13 +5,16 @@ import { createClient } from "@supabase/supabase-js";
 import { fetchBorosImpliedAprQuote } from "@/lib/boros";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
 type PredictedFundingVenue = [string, { fundingRate: string; nextFundingTime?: number } | null];
 type PredictedFundingRow = [string, PredictedFundingVenue[]];
 
 const HL_INFO_MAINNET = "https://api.hyperliquid.xyz/info";
 const DEFAULT_BOROS_MARKET_ADDRESS = "0x8db1397beb16a368711743bc42b69904e4e82122";
-const SYNC_MIN_INTERVAL_MS = 60_000;
+const SYNC_MIN_INTERVAL_MS = 15_000;
+const DEFAULT_AGENT_SIDECAR_URL = "http://127.0.0.1:8791";
 
 const minuteBucketIso = () => new Date(Math.floor(Date.now() / 60_000) * 60_000).toISOString();
 
@@ -60,12 +63,16 @@ const readServerEnv = (key: string): string | undefined => {
   return undefined;
 };
 
+const AGENT_SIDECAR_URL = readServerEnv("KYUTE_AGENT_SIDECAR_URL") ?? DEFAULT_AGENT_SIDECAR_URL;
+
 const BOROS_MARKET_ADDRESS = (
   readServerEnv("BOROS_MARKET_ADDRESS") ??
   readServerEnv("NEXT_PUBLIC_BOROS_MARKET_ADDRESS") ??
   DEFAULT_BOROS_MARKET_ADDRESS
 ).toLowerCase();
 const BOROS_CORE_API_URL = readServerEnv("BOROS_CORE_API_URL");
+const DEFAULT_ETH_BOROS_MARKET_ID = 41;
+const DEFAULT_BTC_BOROS_MARKET_ID = 61;
 
 const resolveBorosMarketAddress = (coin: string): string | null => {
   const normalizedCoin = coin.trim().toUpperCase();
@@ -79,6 +86,69 @@ const resolveBorosMarketAddress = (coin: string): string | null => {
     ""
   ).trim();
   return coinSpecific ? coinSpecific.toLowerCase() : null;
+};
+
+const resolveBorosMarketId = (coin: string): number => {
+  const normalizedCoin = coin.trim().toUpperCase();
+  const coinSpecific = Number(
+    readServerEnv(`BOROS_${normalizedCoin}_MARKET_ID`) ??
+      readServerEnv(`NEXT_PUBLIC_BOROS_${normalizedCoin}_MARKET_ID`) ??
+      "",
+  );
+  if (Number.isFinite(coinSpecific) && coinSpecific > 0) {
+    return Math.floor(coinSpecific);
+  }
+  return normalizedCoin === "BTC" ? DEFAULT_BTC_BOROS_MARKET_ID : DEFAULT_ETH_BOROS_MARKET_ID;
+};
+
+const fetchAgentSnapshot = async (args: {
+  walletAddress: string;
+  coin: string;
+  marketAddress: string | null;
+  marketId: number;
+}) => {
+  const params = new URLSearchParams({
+    walletAddress: args.walletAddress,
+    coin: args.coin,
+    borosMarketId: String(args.marketId),
+  });
+
+  if (args.marketAddress) {
+    params.set("borosMarketAddress", args.marketAddress);
+  }
+
+  const response = await fetch(`${AGENT_SIDECAR_URL.replace(/\/+$/, "")}/internal/agent-snapshot?${params.toString()}`, {
+    method: "GET",
+    cache: "no-store",
+    headers: { accept: "application/json" },
+  });
+
+  if (!response.ok) {
+    throw new Error(`agent sidecar snapshot failed ${response.status}: ${await response.text()}`);
+  }
+
+  const json = (await response.json()) as {
+    ok?: boolean;
+    snapshot?: {
+      funding?: {
+        averageFundingBp?: number;
+      };
+      borosQuote?: {
+        apr?: number | null;
+        marketId?: number;
+        marketAddress?: string | null;
+        field?: string;
+        source?: string;
+      };
+    };
+    error?: string;
+  };
+
+  if (!json.ok || !json.snapshot) {
+    throw new Error(json.error ?? "agent sidecar snapshot unavailable");
+  }
+
+  return json.snapshot;
 };
 
 const formatSyncError = (error: unknown): string => {
@@ -106,8 +176,70 @@ export async function GET(request: Request) {
   try {
     const url = new URL(request.url);
     const coin = (url.searchParams.get("coin") ?? "ETH").trim().toUpperCase();
+    const walletAddress = (url.searchParams.get("walletAddress") ?? "").trim().toLowerCase();
     const requestedMarketAddress = (url.searchParams.get("marketAddress") ?? "").trim().toLowerCase();
+    const requestedMarketId = Number(url.searchParams.get("borosMarketId") ?? "");
     const borosMarketAddress = requestedMarketAddress || resolveBorosMarketAddress(coin);
+    const borosMarketId =
+      Number.isFinite(requestedMarketId) && requestedMarketId > 0
+        ? Math.floor(requestedMarketId)
+        : resolveBorosMarketId(coin);
+
+    if (/^0x[a-fA-F0-9]{40}$/.test(walletAddress)) {
+      try {
+        const snapshot = await fetchAgentSnapshot({
+          walletAddress,
+          coin,
+          marketAddress: borosMarketAddress,
+          marketId: borosMarketId,
+        });
+
+        const averageFundingBp = Number(snapshot.funding?.averageFundingBp ?? NaN);
+        const fundingApr = Number.isFinite(averageFundingBp) ? averageFundingBp / 100 : null;
+        const fundingRate =
+          Number.isFinite(averageFundingBp) ? averageFundingBp / 10_000 / (24 * 365) : null;
+        const borosApr = Number(snapshot.borosQuote?.apr ?? NaN);
+
+        return NextResponse.json({
+          ok: true,
+          funding: fundingApr != null
+            ? {
+                timestamp: new Date().toISOString(),
+                asset_symbol: coin,
+                venue: "HlPerp",
+                funding_rate: fundingRate,
+                funding_apr: fundingApr,
+                next_funding_time: null,
+              }
+            : null,
+          boros: Number.isFinite(borosApr)
+            ? {
+                timestamp: new Date().toISOString(),
+                asset_symbol: coin,
+                market_address: borosMarketAddress ?? snapshot.borosQuote?.marketAddress ?? null,
+                implied_apr: borosApr * 100,
+                source: snapshot.borosQuote?.source ?? "agent_sidecar",
+              }
+            : null,
+          warning: null,
+          cached: false,
+          debug: {
+            borosSourcePath: "agent_sidecar_snapshot",
+            borosMarketAddress:
+              borosMarketAddress ?? snapshot.borosQuote?.marketAddress ?? null,
+            borosMarketId,
+            coin,
+          },
+        });
+      } catch (sidecarError) {
+        console.warn(
+          `[rates-sync] live sidecar snapshot failed for ${coin}; falling back to persisted sync: ${
+            sidecarError instanceof Error ? sidecarError.message : String(sidecarError)
+          }`,
+        );
+      }
+    }
+
     const supabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY ?? process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
     if (!supabaseUrl || !supabaseKey) {
@@ -183,6 +315,7 @@ export async function GET(request: Request) {
           borosSourcePath: initial.borosSourcePath,
           skippedSync: true,
           borosMarketAddress: borosMarketAddress ?? null,
+          borosMarketId,
           coin,
         },
       });
@@ -192,6 +325,7 @@ export async function GET(request: Request) {
       // 1) Pull mainnet funding from Hyperliquid and persist.
       const hlResponse = await fetch(HL_INFO_MAINNET, {
         method: "POST",
+        cache: "no-store",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ type: "predictedFundings" }),
       });
@@ -273,6 +407,7 @@ export async function GET(request: Request) {
           latest.latestBoros?.market_address ??
           initial.latestBoros?.market_address ??
           null,
+        borosMarketId,
         coin,
       },
     });

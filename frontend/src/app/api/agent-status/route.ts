@@ -3,6 +3,9 @@ import { createClient } from "@supabase/supabase-js";
 import fs from "node:fs";
 import path from "node:path";
 
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
+
 type SourceKey = "snapshots" | "hedges" | "aiLogs";
 
 interface SourceState {

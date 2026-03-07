@@ -31,6 +31,8 @@ type UseHyperliquidDashboardOptions = {
   coin?: string;
   pair?: string;
   borosMarketAddress?: string | null;
+  borosMarketId?: number | null;
+  walletAddress?: string | null;
 };
 
 const isTestnet = () => {
@@ -42,6 +44,7 @@ const isTestnet = () => {
 const relayInfo = async (payload: Record<string, unknown>, testnet: boolean): Promise<unknown> => {
   const res = await fetch("/api/hyperliquid/relay", {
     method: "POST",
+    cache: "no-store",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       kind: "info",
@@ -128,7 +131,9 @@ const fetchPersistedSeries = async (wallet: string, testnet: boolean, coin: stri
     coin,
     testnet: testnet ? "true" : "false",
   });
-  const response = await fetch(`/api/position-history?${qs.toString()}`);
+  const response = await fetch(`/api/position-history?${qs.toString()}`, {
+    cache: "no-store",
+  });
   const body = (await response.json()) as { ok: boolean; points?: Array<{ timestamp: string; total_open: number }>; error?: string };
   if (!response.ok || !body.ok) {
     throw new Error(body.error ?? `position-history failed (${response.status})`);
@@ -146,6 +151,8 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
   const assetSymbol = String(options.coin ?? "ETH").trim().toUpperCase();
   const pair = String(options.pair ?? `${assetSymbol}USDC`).trim().toUpperCase();
   const borosMarketAddress = String(options.borosMarketAddress ?? "").trim().toLowerCase();
+  const borosMarketId = Number.isFinite(Number(options.borosMarketId)) ? Number(options.borosMarketId) : null;
+  const preferredWalletAddress = String(options.walletAddress ?? "").trim().toLowerCase();
   const [state, setState] = useState<DashboardState>({
     assetSymbol,
     pair,
@@ -170,7 +177,9 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
       const connectedWallet = account?.address?.toLowerCase();
       const cachedWallet = getCachedWalletAddress();
       const inferredWallet = inferWalletFromSessionCache();
-      const wallet = connectedWallet || cachedWallet || inferredWallet;
+      const wallet = /^0x[a-f0-9]{40}$/.test(preferredWalletAddress)
+        ? preferredWalletAddress
+        : connectedWallet || cachedWallet || inferredWallet;
       setCachedWalletAddress(connectedWallet);
 
       // Hydrate from cached points to avoid blank graph during hard refreshes.
@@ -201,8 +210,12 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
           relayInfo({ type: "metaAndAssetCtxs" }, testnet),
           fetch(`/api/rates-sync?${new URLSearchParams({
             coin: assetSymbol,
+            ...(wallet ? { walletAddress: wallet } : {}),
             ...(borosMarketAddress ? { marketAddress: borosMarketAddress } : {}),
-          }).toString()}`).then(async (res) => {
+            ...(borosMarketId != null ? { borosMarketId: String(borosMarketId) } : {}),
+          }).toString()}`, {
+            cache: "no-store",
+          }).then(async (res) => {
             const body = (await res.json()) as {
               ok: boolean;
               error?: string;
@@ -312,7 +325,7 @@ export function useHyperliquidDashboard(options: UseHyperliquidDashboardOptions 
       cancelled = true;
       clearInterval(id);
     };
-  }, [account?.address, assetSymbol, borosMarketAddress, pair]);
+  }, [account?.address, assetSymbol, borosMarketAddress, borosMarketId, pair, preferredWalletAddress]);
 
   return useMemo(() => state, [state]);
 }

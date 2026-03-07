@@ -506,7 +506,10 @@ const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> =>
       source: identity.source,
     },
     strategy: {
+      enabled: strategy.enabled,
       mode: strategy.mode,
+      entryThresholdBp: strategy.entryThresholdBp ?? undefined,
+      exitThresholdBp: strategy.exitThresholdBp ?? undefined,
       source: strategy.source,
       ...(strategy.warning ? { warning: strategy.warning } : {}),
     },
