@@ -22,13 +22,12 @@ import { buildHedgeExecutionPlan } from "./hedge-execution-plan.js";
 import { fetchBorosImpliedAprQuote } from "./boros.js";
 import { resolveFreshOracleTimestamp } from "./oracle-timestamp.js";
 import { resolveUserHedgeMode } from "./strategy-config.js";
-import { readWalletBridgeRecord, resolveWalletUserId } from "./wallet-bridge.js";
+import { resolveRequiredWalletIdentity } from "./wallet-bridge.js";
 
 dotenv.config({ path: path.resolve(process.cwd(), "../contracts/.env"), quiet: true });
 
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 const DEFAULT_RPC_URL = "http://127.0.0.1:8545";
-const DEFAULT_USER_ID = 123n;
 const DEFAULT_YU_TOKEN = "0x0000000000000000000000000000000000000001";
 const DEFAULT_PREDICTED_APR_BP = 10_000n;
 const DEFAULT_CONFIDENCE_BP = 10_000n;
@@ -119,6 +118,13 @@ const KYUTE_VAULT_ABI = [
       { name: "currentHedgeIsLong", type: "bool" },
       { name: "targetHedgeIsLong", type: "bool" },
     ],
+  },
+  {
+    type: "function",
+    name: "creCallbackOperator",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "", type: "address" }],
   },
   {
     type: "function",
@@ -369,60 +375,23 @@ const resolveConfiguredHedgeMode = (): HedgeMode => {
   return "adverse_only";
 };
 
-const resolveLiveHyperliquidAddress = async (params: {
-  userId?: bigint;
-  vaultAddress: Address;
-  mappedUser: Address;
-}): Promise<{ address: Address | null; source: string }> => {
-  const bridged = await readWalletBridgeRecord({
-    userId: params.userId,
-  });
-  if (bridged) {
-    return { address: bridged.walletAddress, source: "frontend_bridge" };
-  }
-
-  const allowDemoOverride = parseBoolEnv("KYUTE_ALLOW_DEMO_HL_ADDRESS", false);
-  if (allowDemoOverride) {
-    const envAddress = readOptionalAddress(process.env.HL_ADDRESS ?? process.env.DEMO_HL_ADDRESS);
-    if (envAddress) {
-      return { address: envAddress, source: "env_demo_override" };
-    }
-  }
-
-  if (params.mappedUser.toLowerCase() !== ZERO_ADDRESS.toLowerCase()) {
-    return { address: params.mappedUser, source: "vault_mapping" };
-  }
-
-  return { address: null, source: "unresolved" };
-};
-
-const resolveExecutionUserId = async (vaultAddress: Address): Promise<bigint> => {
+const resolveExecutionIdentity = async (vaultAddress: Address): Promise<{
+  userId: bigint;
+  walletAddress: Address;
+  source: string;
+}> => {
   const envWallet = readOptionalAddress(process.env.HL_ADDRESS ?? process.env.DEMO_HL_ADDRESS);
-  if (envWallet) {
-    const bridgedUserId = await resolveWalletUserId({
-      walletAddress: envWallet,
-    });
-    if (bridgedUserId !== null) {
-      return bridgedUserId;
-    }
-  }
 
-  const explicitUserId = process.env.DEMO_USER_ID?.trim();
-  if (explicitUserId) {
-    return parseBigIntEnv("DEMO_USER_ID", DEFAULT_USER_ID);
-  }
+  const identity = await resolveRequiredWalletIdentity({
+    walletAddress: envWallet,
+    vaultAddress,
+  });
 
-  const latestBridgeRecord = await readWalletBridgeRecord({ vaultAddress });
-  if (latestBridgeRecord) {
-    return BigInt(latestBridgeRecord.userId);
-  }
-
-  const anyBridgeRecord = await readWalletBridgeRecord({});
-  if (anyBridgeRecord) {
-    return BigInt(anyBridgeRecord.userId);
-  }
-
-  return DEFAULT_USER_ID;
+  return {
+    userId: BigInt(identity.record.userId),
+    walletAddress: identity.record.walletAddress,
+    source: identity.source,
+  };
 };
 
 const fetchHyperliquidFundingBp = async (
@@ -577,7 +546,8 @@ async function main() {
   const vaultAddress = resolveVaultAddress();
   const yuToken = readRequiredAddress(process.env.BOROS_YU_TOKEN ?? DEFAULT_YU_TOKEN, "BOROS_YU_TOKEN");
 
-  const userId = await resolveExecutionUserId(vaultAddress);
+  const identity = await resolveExecutionIdentity(vaultAddress);
+  const userId = identity.userId;
   const confidenceBp = parseBigIntEnv("DEMO_CONFIDENCE_BP", DEFAULT_CONFIDENCE_BP);
   const oracleTimestampOverride = process.env.DEMO_ORACLE_TIMESTAMP?.trim()
     ? parseBigIntEnv("DEMO_ORACLE_TIMESTAMP", BigInt(Math.floor(Date.now() / 1000)))
@@ -596,6 +566,9 @@ async function main() {
   const publicClient = createPublicClient({ transport: http(rpcUrl) });
   const walletClient = createWalletClient({ account, transport: http(rpcUrl), chain: undefined });
   await ensureContractDeployed(publicClient, vaultAddress, rpcUrl, "Vault");
+  console.log(
+    `[direct-hedge] resolved identity source=${identity.source} userId=${userId} wallet=${identity.walletAddress}`,
+  );
 
   let mappedUser = (await publicClient.readContract({
     address: vaultAddress,
@@ -608,22 +581,23 @@ async function main() {
   const hlPositionUrl = resolveHyperliquidInfoUrl("position");
   const useMarkPrice = parseBoolEnv("DEMO_HEDGE_NOTIONAL_USE_MARK_PRICE", false);
   const notionalRatio = parseNumberEnv("DEMO_HEDGE_NOTIONAL_RATIO", 1);
-  const hlAddressResolution = await resolveLiveHyperliquidAddress({
-    userId,
-    vaultAddress,
-    mappedUser,
-  });
+  const hlLookupAddress = identity.walletAddress;
   if (hlFundingUrl !== hlPositionUrl) {
     console.log(
       `[direct-hedge] using separate HL endpoints fundingUrl=${hlFundingUrl} positionUrl=${hlPositionUrl}`,
     );
   }
-  const hlLookupAddress = hlAddressResolution.address;
-  if (!hlLookupAddress && mappedUser.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
-    console.log(`[direct-hedge] userId=${userId} has no registered wallet; skipping`);
-    return;
-  }
-  if (hlLookupAddress && mappedUser.toLowerCase() !== hlLookupAddress.toLowerCase()) {
+  if (mappedUser.toLowerCase() === ZERO_ADDRESS.toLowerCase()) {
+    const registeredOperator = (await publicClient.readContract({
+      address: vaultAddress,
+      abi: KYUTE_VAULT_ABI,
+      functionName: "creCallbackOperator",
+    } as any)) as Address;
+    if (registeredOperator.toLowerCase() !== account.address.toLowerCase()) {
+      throw new Error(
+        `Vault mapping missing for userId=${userId} expectedWallet=${hlLookupAddress}. Callback signer ${account.address} does not match vault creCallbackOperator ${registeredOperator}.`,
+      );
+    }
     const syncUserData = encodeFunctionData({
       abi: KYUTE_VAULT_ABI,
       functionName: "syncUserAddress",
@@ -641,6 +615,10 @@ async function main() {
     }
     mappedUser = hlLookupAddress;
     console.log(`[direct-hedge] synced user mapping tx=${syncUserTxHash} userId=${userId} wallet=${hlLookupAddress}`);
+  } else if (mappedUser.toLowerCase() !== hlLookupAddress.toLowerCase()) {
+    throw new Error(
+      `Vault mapping mismatch for userId=${userId}: onchain=${mappedUser} supabase=${hlLookupAddress}`,
+    );
   }
 
   const positionBefore = mappedUser.toLowerCase() === ZERO_ADDRESS.toLowerCase()
@@ -725,9 +703,9 @@ async function main() {
       );
     }
 
-    targetSource = `hyperliquid_${hlAddressResolution.source}`;
+    targetSource = `hyperliquid_${identity.source}`;
     console.log(
-      `[direct-hedge] derived target from HL: wallet=${hlLookupAddress} source=${hlAddressResolution.source} size=${hlSize.toFixed(6)} coin=${hlCoinDefault} mark=${hlMarkPrice.toFixed(4)} side=${hlSide} fundingBp=${averageFundingBp} useMark=${useMarkPrice} ratio=${notionalRatio} targetWei=${proposedTargetHedgeNotionalWei}`,
+      `[direct-hedge] derived target from HL: wallet=${hlLookupAddress} source=${identity.source} size=${hlSize.toFixed(6)} coin=${hlCoinDefault} mark=${hlMarkPrice.toFixed(4)} side=${hlSide} fundingBp=${averageFundingBp} useMark=${useMarkPrice} ratio=${notionalRatio} targetWei=${proposedTargetHedgeNotionalWei}`,
     );
   } else if (manualNotional && manualNotional.length > 0) {
     hlPositionNotionalWei = BigInt(manualNotional);

@@ -18,6 +18,15 @@ DEFAULT_FORK_URL="https://arb1.arbitrum.io/rpc"
 DEMO_USER_ID_DEFAULT=123
 DEFAULT_YU_TOKEN="0x0000000000000000000000000000000000000001"
 DEMO_POSITION_NOTIONAL_WEI_DEFAULT=1000000000000000000
+KYUTE_AGENT_SIDECAR_URL="${KYUTE_AGENT_SIDECAR_URL:-http://127.0.0.1:8791}"
+if [ -z "${KYUTE_AGENT_SIDECAR_PORT:-}" ]; then
+    sidecar_port_from_url=$(printf '%s' "${KYUTE_AGENT_SIDECAR_URL}" | sed -E 's#^https?://[^:/]+:([0-9]+).*$#\1#' || true)
+    if [[ "${sidecar_port_from_url}" =~ ^[0-9]+$ ]]; then
+        export KYUTE_AGENT_SIDECAR_PORT="${sidecar_port_from_url}"
+    else
+        export KYUTE_AGENT_SIDECAR_PORT="8791"
+    fi
+fi
 
 require_dotenv_var() {
     local key="$1"
@@ -43,6 +52,10 @@ cleanup() {
     if [ -n "${FETCHER_PID:-}" ]; then
         kill "${FETCHER_PID}" 2>/dev/null || true
         echo "   ✓ Telemetry fetcher stopped."
+    fi
+    if [ -n "${AGENT_SIDECAR_PID:-}" ]; then
+        kill "${AGENT_SIDECAR_PID}" 2>/dev/null || true
+        echo "   ✓ Agent sidecar stopped."
     fi
     exit 0
 }
@@ -243,6 +256,105 @@ resolve_canonical_demo_wallet() {
     fi
 }
 
+resolve_supabase_demo_identity() {
+    local canonical_wallet
+    canonical_wallet=$(resolve_canonical_demo_wallet || true)
+    if [[ ! "${canonical_wallet}" =~ ^0x[0-9a-fA-F]{40}$ ]]; then
+        echo "   • No canonical wallet configured for enrollment."
+        return 1
+    fi
+
+    local supabase_url="${SUPABASE_URL:-}"
+    local supabase_key="${CRE_SUPABASE_KEY:-${SUPABASE_KEY:-}}"
+    if [ -z "${supabase_url}" ] || [ -z "${supabase_key}" ]; then
+        echo "   • Supabase URL/key unavailable; cannot resolve enrollment identity."
+        return 1
+    fi
+
+    local canonical_wallet_lower
+    canonical_wallet_lower=$(printf '%s' "${canonical_wallet}" | tr '[:upper:]' '[:lower:]')
+    local query_url="${supabase_url%/}/rest/v1/kyute_user_wallets?select=user_id,wallet_address,expires_at&order=updated_at.desc&limit=1&wallet_address=eq.${canonical_wallet_lower}"
+    local response
+    if ! response=$(curl -fsS \
+        -H "apikey: ${supabase_key}" \
+        -H "Authorization: Bearer ${supabase_key}" \
+        -H "Accept: application/json" \
+        "${query_url}" 2>/tmp/kyute_enroll_supabase.err); then
+        echo "   • Failed to query Supabase for canonical wallet ${canonical_wallet}."
+        tail -n 5 /tmp/kyute_enroll_supabase.err 2>/dev/null || true
+        return 1
+    fi
+
+    local identity_line
+    identity_line=$(node -e '
+        const payload = JSON.parse(process.argv[1]);
+        if (!Array.isArray(payload) || payload.length === 0) process.exit(2);
+        const row = payload[0] ?? {};
+        const userId = Number(row.user_id);
+        const wallet = typeof row.wallet_address === "string" ? row.wallet_address.trim().toLowerCase() : "";
+        const expiresAt = typeof row.expires_at === "string" ? Date.parse(row.expires_at) : Number.NaN;
+        if (!Number.isFinite(userId) || userId <= 0 || !/^0x[0-9a-f]{40}$/.test(wallet)) process.exit(3);
+        if (Number.isFinite(expiresAt) && expiresAt <= Date.now()) process.exit(4);
+        process.stdout.write(`${userId} ${wallet}`);
+    ' "${response}" 2>/tmp/kyute_enroll_identity.err || true)
+
+    if [ -z "${identity_line}" ]; then
+        echo "   • No valid Supabase identity row found for canonical wallet ${canonical_wallet}."
+        tail -n 5 /tmp/kyute_enroll_identity.err 2>/dev/null || true
+        return 1
+    fi
+
+    printf '%s' "${identity_line}"
+}
+
+enroll_canonical_wallet() {
+    if [ -z "${VAULT_ADDRESS:-}" ]; then
+        echo "   • Vault address missing; cannot enroll canonical wallet."
+        return 1
+    fi
+    if [ -z "${ANVIL_PRIVATE_KEY:-}" ]; then
+        echo "   • ANVIL_PRIVATE_KEY missing; cannot enroll canonical wallet."
+        return 1
+    fi
+
+    local identity_line
+    identity_line=$(resolve_supabase_demo_identity || true)
+    if [ -z "${identity_line}" ]; then
+        return 1
+    fi
+
+    local enroll_user_id enroll_wallet
+    enroll_user_id=$(printf '%s' "${identity_line}" | awk '{print $1}')
+    enroll_wallet=$(printf '%s' "${identity_line}" | awk '{print $2}')
+    if [ -z "${enroll_user_id}" ] || [[ ! "${enroll_wallet}" =~ ^0x[0-9a-f]{40}$ ]]; then
+        echo "   • Failed to parse enrollment identity: ${identity_line}"
+        return 1
+    fi
+
+    echo "   • Enrolling canonical wallet ${enroll_wallet} as userId=${enroll_user_id} on vault ${VAULT_ADDRESS}..."
+    if ! cast send "${VAULT_ADDRESS}" \
+        "syncUserAddress(uint256,address)" \
+        "${enroll_user_id}" \
+        "${enroll_wallet}" \
+        --rpc-url "${DEMO_RPC_URL}" \
+        --private-key "${ANVIL_PRIVATE_KEY}" \
+        >/tmp/kyute_enroll_sync.log 2>&1; then
+        echo "   • syncUserAddress enrollment failed."
+        tail -n 20 /tmp/kyute_enroll_sync.log 2>/dev/null || true
+        return 1
+    fi
+
+    local mapped_wallet
+    mapped_wallet=$(cast call "${VAULT_ADDRESS}" "userIdToAddress(uint256)(address)" "${enroll_user_id}" --rpc-url "${DEMO_RPC_URL}" 2>/tmp/kyute_enroll_verify.err | tr '[:upper:]' '[:lower:]' || true)
+    if [ "${mapped_wallet}" != "${enroll_wallet}" ]; then
+        echo "   • Enrollment verification failed: expected ${enroll_wallet}, got ${mapped_wallet:-<empty>}."
+        tail -n 10 /tmp/kyute_enroll_verify.err 2>/dev/null || true
+        return 1
+    fi
+
+    echo "   ✓ Canonical wallet enrolled on new vault."
+}
+
 deploy_mock_router() {
     echo "   • BOROS_ROUTER_ADDRESS not set; deploying MockBorosRouter to local fork..."
     if ! forge_broadcast_cmd "script/DeployMockBorosRouter.s.sol:DeployMockBorosRouter" "/tmp/kyute_mock_router.log"; then
@@ -365,25 +477,43 @@ if [ -f "${KYUTE_STAGING_CONFIG}" ]; then
             const fs = require("fs");
             const path = process.argv[1];
             const vaultAddress = process.argv[2];
+            const sidecarUrl = process.argv[3];
             const json = JSON.parse(fs.readFileSync(path, "utf8"));
             json.vaultAddress = vaultAddress;
+            json.agentSidecarUrl = sidecarUrl;
             fs.writeFileSync(path, JSON.stringify(json, null, 2) + "\n");
-        ' "${KYUTE_STAGING_CONFIG}" "${VAULT_ADDRESS}"
-        echo "   ✓ Updated ${KYUTE_STAGING_CONFIG} with deployed vaultAddress"
+        ' "${KYUTE_STAGING_CONFIG}" "${VAULT_ADDRESS}" "${KYUTE_AGENT_SIDECAR_URL}"
+        echo "   ✓ Updated ${KYUTE_STAGING_CONFIG} with deployed vaultAddress and agentSidecarUrl"
     else
         echo "   • node not found; skipping automatic staging config update."
     fi
 fi
 echo "   ✓ Contracts deployed."
 seed_demo_state
+if ! enroll_canonical_wallet; then
+    if [ "${DEMO_EXEC_MODE}" = "cre" ]; then
+        echo "   ✗ Vault enrollment failed. CRE mode requires syncUserAddress during startup."
+        exit 1
+    fi
+    echo "   • Continuing without automatic enrollment because mode=${DEMO_EXEC_MODE}."
+fi
 echo ""
 
-# ── 4. Boot the Telemetry Sidecar ─────────────────
-echo "[3/4] Booting Supabase Telemetry sidecar..."
+# ── 4. Boot Sidecars ──────────────────────────────
+echo "[3/4] Booting telemetry and agent sidecars..."
 cd "${CRE_DIR}"
 bun run boros-fetcher.ts > /dev/null 2>&1 &
 FETCHER_PID=$!
-echo "   ✓ Sidecar running in background (PID: ${FETCHER_PID})"
+echo "   ✓ Telemetry sidecar running in background (PID: ${FETCHER_PID})"
+bun run kyute-agent-sidecar.ts > /tmp/kyute_agent_sidecar.log 2>&1 &
+AGENT_SIDECAR_PID=$!
+sleep 1
+if ! kill -0 "${AGENT_SIDECAR_PID}" 2>/dev/null; then
+    echo "   ✗ Agent sidecar failed to start. Last lines from /tmp/kyute_agent_sidecar.log:"
+    tail -n 40 /tmp/kyute_agent_sidecar.log || true
+    exit 1
+fi
+echo "   ✓ Agent sidecar running at ${KYUTE_AGENT_SIDECAR_URL} (PID: ${AGENT_SIDECAR_PID})"
 echo "Waiting 5 seconds for initial Supabase data population..."
 sleep 5
 echo ""
