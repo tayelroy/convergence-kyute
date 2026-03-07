@@ -109,12 +109,13 @@ export default function DashboardPage() {
     hedges,
     aiLogs,
     chainlinkAutomation,
-    chainlinkFunctions,
-    chainlinkFeed,
-    chainlinkCcip,
-    loading,
-    error,
-    degraded,
+        chainlinkFunctions,
+        chainlinkFeed,
+        chainlinkCcip,
+        creLogLines,
+        loading,
+        error,
+        degraded,
     warnings,
     lastUpdated,
   } = useAgentStatus();
@@ -427,15 +428,16 @@ export default function DashboardPage() {
           </div>
 
           <div className="h-[300px] lg:col-span-9">
-            <ExecutionConsole
-              aiLogs={aiLogs}
-              hedges={hedges}
-              chainlinkAutomation={chainlinkAutomation}
-              chainlinkFunctions={chainlinkFunctions}
-              chainlinkFeed={chainlinkFeed}
-              chainlinkCcip={chainlinkCcip}
-              loading={loading}
-            />
+                <ExecutionConsole
+                    aiLogs={aiLogs}
+                    hedges={hedges}
+                    chainlinkAutomation={chainlinkAutomation}
+                    chainlinkFunctions={chainlinkFunctions}
+                    chainlinkFeed={chainlinkFeed}
+                    chainlinkCcip={chainlinkCcip}
+                    creLogLines={creLogLines}
+                    loading={loading}
+                />
           </div>
         </div>
       </main>

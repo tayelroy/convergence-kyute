@@ -1,7 +1,7 @@
 
 "use client";
 
-import React, { useMemo } from "react";
+import React, { useEffect, useMemo, useRef } from "react";
 import { Terminal } from "lucide-react";
 import type {
     AiDecision,
@@ -10,6 +10,7 @@ import type {
     ChainlinkFunctionsEvent,
     ChainlinkFeedEvent,
     ChainlinkCcipEvent,
+    CreLogLine,
 } from "@/hooks/useAgentStatus";
 
 interface ExecutionConsoleProps {
@@ -19,6 +20,7 @@ interface ExecutionConsoleProps {
     chainlinkFunctions: ChainlinkFunctionsEvent[];
     chainlinkFeed: ChainlinkFeedEvent[];
     chainlinkCcip: ChainlinkCcipEvent[];
+    creLogLines: CreLogLine[];
     loading?: boolean;
 }
 
@@ -40,8 +42,12 @@ export function ExecutionConsole({
     chainlinkFunctions,
     chainlinkFeed,
     chainlinkCcip,
+    creLogLines,
     loading = false,
 }: ExecutionConsoleProps) {
+    const rawCreLogs = useMemo(() => creLogLines.slice(0, 80), [creLogLines]);
+    const scrollRef = useRef<HTMLDivElement | null>(null);
+
     const logs = useMemo(() => {
         const aiEntries = aiLogs.map((item) => ({
             timestamp: item.timestamp,
@@ -96,6 +102,11 @@ export function ExecutionConsole({
             .slice(0, 40);
     }, [aiLogs, hedges, chainlinkAutomation, chainlinkFunctions, chainlinkFeed, chainlinkCcip]);
 
+    useEffect(() => {
+        if (!scrollRef.current) return;
+        scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
+    }, [rawCreLogs.length, logs.length]);
+
     return (
         <div className="flex flex-col h-full bg-[#030303] border border-[#1a1a1a] rounded-sm font-mono text-xs overflow-hidden">
             <div className="flex items-center px-3 py-2 border-b border-[#1a1a1a] bg-[#0a0a0a]">
@@ -103,34 +114,40 @@ export function ExecutionConsole({
                 <span className="text-[#666] uppercase tracking-wider font-bold">Agent Activity Log</span>
             </div>
 
-            <div className="flex-1 overflow-y-auto no-scrollbar p-3 space-y-1 text-[#4bf3a6]">
-                {loading && logs.length === 0 && (
+            <div ref={scrollRef} className="flex-1 overflow-y-auto no-scrollbar p-3 space-y-1 text-[#4bf3a6]">
+                {loading && rawCreLogs.length === 0 && logs.length === 0 && (
                     <div className="opacity-80 pl-2 text-[#666]">Loading live events...</div>
                 )}
-                {!loading && logs.length === 0 && (
+                {!loading && rawCreLogs.length === 0 && logs.length === 0 && (
                     <div className="opacity-80 pl-2 text-[#666]">No events yet. Agent heartbeat will appear after first cycle.</div>
                 )}
-                {logs.map((log, i) => (
-                    <div key={i} className="border-l-2 border-transparent hover:border-[#4bf3a6] pl-2 py-1 opacity-90 hover:opacity-100 transition-all">
-                        <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-[#444] text-[10px]">
-                                {new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}
-                            </span>
-                            <span className="text-[#4bf3a6]">{log.action}</span>
+                {rawCreLogs.length > 0
+                    ? rawCreLogs.map((log) => (
+                        <div key={log.id} className="border-l-2 border-transparent hover:border-[#4bf3a6] pl-2 py-1 opacity-90 hover:opacity-100 transition-all">
+                            <div className="text-[10px] text-[#8ba58f] break-words whitespace-pre-wrap">{log.line}</div>
                         </div>
-                        <div className="mt-1 flex items-center gap-3 flex-wrap text-[10px] text-[#7adbb2]">
-                            {log.amountEth != null && (
-                                <span>amount={log.amountEth.toFixed(4)} {log.action.startsWith("BOROS") ? "YU" : "ETH"}</span>
-                            )}
-                            {log.txHash && (
-                                <span className="text-[#666] truncate max-w-[280px]">tx={log.txHash}</span>
-                            )}
+                    ))
+                    : logs.map((log, i) => (
+                        <div key={i} className="border-l-2 border-transparent hover:border-[#4bf3a6] pl-2 py-1 opacity-90 hover:opacity-100 transition-all">
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <span className="text-[#444] text-[10px]">
+                                    {new Date(log.timestamp).toLocaleTimeString([], { hour12: false })}
+                                </span>
+                                <span className="text-[#4bf3a6]">{log.action}</span>
+                            </div>
+                            <div className="mt-1 flex items-center gap-3 flex-wrap text-[10px] text-[#7adbb2]">
+                                {log.amountEth != null && (
+                                    <span>amount={log.amountEth.toFixed(4)} {log.action.startsWith("BOROS") ? "YU" : "ETH"}</span>
+                                )}
+                                {log.txHash && (
+                                    <span className="text-[#666] truncate max-w-[280px]">tx={log.txHash}</span>
+                                )}
+                            </div>
+                            {log.detail ? (
+                                <div className="mt-1 text-[10px] text-[#8ba58f] break-words">{log.detail}</div>
+                            ) : null}
                         </div>
-                        {log.detail ? (
-                            <div className="mt-1 text-[10px] text-[#8ba58f] break-words">{log.detail}</div>
-                        ) : null}
-                    </div>
-                ))}
+                    ))}
             </div>
         </div>
     );

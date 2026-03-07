@@ -558,14 +558,13 @@ echo "   Press Ctrl+C at any time to safely shut down."
 echo ""
 
 run_cre_cycle() {
-    : > "${CRE_LOG_PATH}"
     if [ "${DEMO_CLEAN_CRE_OUTPUT}" != "true" ]; then
-        cre workflow simulate ./kyute-agent --target=staging-settings | tee "${CRE_LOG_PATH}"
+        cre workflow simulate ./kyute-agent --target=staging-settings | tee -a "${CRE_LOG_PATH}"
         return
     fi
 
     cre workflow simulate ./kyute-agent --target=staging-settings 2>&1 \
-        | tee "${CRE_LOG_PATH}" \
+        | tee -a "${CRE_LOG_PATH}" \
         | awk '
             BEGIN { show_result = 0 }
             /^✓ Workflow compiled$/ { print; next }
@@ -587,9 +586,10 @@ run_cre_cycle() {
 }
 
 while true; do
-    echo "======================================================"
-    echo "[$(date +'%T')] Triggering CRE Execution..."
-    echo "======================================================"
+    : > "${CRE_LOG_PATH}"
+    echo "======================================================" | tee -a "${CRE_LOG_PATH}"
+    echo "[$(date +'%T')] Triggering CRE Execution..." | tee -a "${CRE_LOG_PATH}"
+    echo "======================================================" | tee -a "${CRE_LOG_PATH}"
 
     if [ "${DEMO_EXEC_MODE}" = "cre" ]; then
         run_cre_cycle
@@ -597,7 +597,7 @@ while true; do
         bun run direct-hedge-cycle.ts
     fi
 
-    echo ""
-    echo "Workflow complete. Waiting 30s..."
+    echo "" | tee -a "${CRE_LOG_PATH}"
+    echo "Workflow complete. Waiting 30s..." | tee -a "${CRE_LOG_PATH}"
     sleep 30
 done

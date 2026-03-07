@@ -1460,9 +1460,6 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
     }
 
     runtime.log(`Using agent sidecar ${agentSidecarUrl}`);
-    if (hlFundingUrl !== hlPositionUrl) {
-      runtime.log(`Using separate HL endpoints fundingUrl=${hlFundingUrl} positionUrl=${hlPositionUrl}`);
-    }
     const marketOutcomes: string[] = [];
 
     for (const market of markets) {
@@ -1501,17 +1498,9 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       const borosQuote = snapshot.borosQuote;
       const position = snapshot.position;
 
-      runtime.log(`${prefix} Resolved identity source=${hlWallet.source} userId=${userId} wallet=${hlWallet.address}`);
-      runtime.log(
-        `${prefix} Using strategy mode ${hedgeMode} enabled=${strategyEnabled} entryBp=${entryThresholdBp} exitBp=${exitThresholdBp} from ${snapshot.strategy.source}`,
-      );
       if (snapshot.strategy.warning) {
         runtime.log(`${prefix} Strategy mode warning: ${snapshot.strategy.warning}`);
       }
-      runtime.log(`${prefix} Decoded mapped user address=${mappedUser}`);
-      runtime.log(
-        `${prefix} Fetched live inputs fundingBp=${funding.averageFundingBp} borosMarketId=${borosQuote.marketId} hlSize=${position.hlSize.toFixed(6)} side=${position.positionSide}`,
-      );
 
       if (hasVaultAddress && mappedUser === ZERO_ADDRESS) {
         throw new Error(
@@ -1527,11 +1516,6 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       const oracleTimestamp = resolveFreshOracleTimestamp(funding.latestFundingTimestampMs);
       if (borosQuote.apr === null) {
         throw new Error(`Boros APR missing for marketId=${borosQuote.marketId} field=${borosQuote.field}`);
-      }
-      if (oracleTimestamp.source !== "latest_point") {
-        runtime.log(
-          `${prefix} Oracle timestamp source=${oracleTimestamp.source} latestPointSec=${oracleTimestamp.latestPointSec ?? "none"} usingCurrentSec=${oracleTimestamp.oracleTimestampSec}`,
-        );
       }
 
       const borosApr = borosQuote.apr;
@@ -1573,15 +1557,13 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       const targetHedgeIsLong = executionPlan.targetHedgeIsLong;
       const targetHedgeNotionalWei = executionPlan.targetHedgeNotionalWei;
 
+      const targetLabel = shouldHedge
+        ? targetHedgeIsLong
+          ? "LONG_YU"
+          : "SHORT_YU"
+        : "FLAT";
       runtime.log(
-        `${prefix} Decision summary mode=${hedgeMode} exposure=${decision.exposure} edgeBp=${decision.edgeBp} shouldHedge=${shouldHedge} targetHedgeIsLong=${targetHedgeIsLong} targetWei=${targetHedgeNotionalWei} action=${executionPlan.action}`,
-      );
-      runtime.log(
-        `${prefix} Boros APR: ${(borosApr * 100).toFixed(2)}% marketId=${borosQuote.marketId} field=${borosQuote.field} midApr=${borosQuote.midApr ?? "null"} lastTradedApr=${borosQuote.lastTradedApr ?? "null"} floatingApr=${borosQuote.floatingApr ?? "null"} state=${borosQuote.state ?? "unknown"} market=${market.borosMarketAddress ?? "n/a"}`,
-      );
-      runtime.log(`${prefix} HL 1h avg funding (annualized): ${funding.averageFundingBp} bp`);
-      runtime.log(
-        `${prefix} HL wallet=${hlWallet.address} source=${hlWallet.source} side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ${market.coin}, mark=${position.markPrice.toFixed(4)}, hedgeNotional=${position.hedgeNotional.toFixed(6)} useMark=${useMarkPrice} exposure=${decision.exposure} edge=${decision.edgeBp}bp targetHedgeIsLong=${targetHedgeIsLong}`,
+        `${prefix} mode=${hedgeMode} enabled=${strategyEnabled} hl=${position.positionSide.toUpperCase()} size=${position.hlSize.toFixed(4)} ${market.coin} funding=${(funding.averageFundingBp / 100).toFixed(2)}% boros=${(borosApr * 100).toFixed(2)}% exposure=${decision.exposure} edge=${decision.edgeBp}bp action=${executionPlan.action} target=${targetLabel}`,
       );
 
       const proofPayload = JSON.stringify({
@@ -1618,7 +1600,6 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       let marketExecuted = false;
       if (executeOnchain) {
         if (!executionPlan.executeNeeded) {
-          runtime.log(`${prefix} No vault execution needed; action=${executionPlan.action}. Syncing market state only.`);
           const sidecarSyncOnly = await http
             .sendRequest(runtime, executeDecisionViaSidecar, consensusIdenticalAggregation())({
               baseUrl: agentSidecarUrl,
@@ -1648,10 +1629,9 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
             })
             .result();
           runtime.log(
-            `${prefix} Agent sidecar sync-only completed syncTx=${sidecarSyncOnly.syncTxHash ?? "none"} executeTx=${sidecarSyncOnly.executeTxHash ?? "none"}`,
+            `${prefix} outcome=SYNC_ONLY syncTx=${sidecarSyncOnly.syncTxHash ?? "none"} executeTx=${sidecarSyncOnly.executeTxHash ?? "none"}`,
           );
         } else {
-          runtime.log(`${prefix} Submitting execute via agent sidecar ${agentSidecarUrl}`);
           const sidecarExecute = await http
             .sendRequest(runtime, executeDecisionViaSidecar, consensusIdenticalAggregation())({
               baseUrl: agentSidecarUrl,
@@ -1680,12 +1660,12 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
             })
             .result();
           runtime.log(
-            `${prefix} Agent sidecar execute completed syncTx=${sidecarExecute.syncTxHash ?? "none"} executeTx=${sidecarExecute.executeTxHash ?? "none"}`,
+            `${prefix} outcome=EXECUTED syncTx=${sidecarExecute.syncTxHash ?? "none"} executeTx=${sidecarExecute.executeTxHash ?? "none"}`,
           );
           marketExecuted = true;
         }
       } else {
-        runtime.log(`${prefix} Onchain execution disabled; decision only.`);
+        runtime.log(`${prefix} outcome=DECISION_ONLY`);
       }
 
       const outcome = resolveMarketExecutionOutcome({
@@ -1697,7 +1677,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       if (executionPlan.executeNeeded && executeOnchain && !marketExecuted) {
         throw new Error(`${prefix} execution required but did not complete`);
       }
-      runtime.log(`${prefix} Hedge Execution Outcome: ${outcome}`);
+      runtime.log(`${prefix} result=${outcome}`);
       marketOutcomes.push(`${market.coin}:${outcome}`);
     }
 
