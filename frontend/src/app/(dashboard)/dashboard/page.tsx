@@ -185,7 +185,6 @@ export default function DashboardPage() {
                             hedgeSide={hasHedge ? hedgeSide : null}
                             lastUpdatedAt={hedgeLastTimestamp ? new Date(hedgeLastTimestamp).toLocaleString() : null}
                             loading={loading}
-                            modeLabel={isForcedExecutionMode ? "Forced execution mode" : null}
                         />
                     </div>
 
