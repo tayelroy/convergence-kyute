@@ -33,10 +33,11 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         bool targetHedgeIsLong;
     }
 
-    // Spec mentions a per-user userId -> Position mapping, and address user mapping
-    // We will map userId to address, and address to Position
+    // userId is resolved off-chain and synced on-chain; positions are market-scoped by YU token.
     mapping(uint256 => address) public userIdToAddress;
-    mapping(address => Position) public userPositions;
+    mapping(address => mapping(address => Position)) public userMarketPositions;
+    mapping(address => address[]) private userTrackedYuTokens;
+    mapping(address => mapping(address => uint256)) private userTrackedYuTokenIndexPlusOne;
 
     event HyperliquidPositionOpened(
         uint256 indexed userId,
@@ -74,6 +75,8 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         address previousUser,
         address user
     );
+    event UserMarketTracked(address indexed user, address indexed yuToken);
+    event UserMarketUntracked(address indexed user, address indexed yuToken);
 
     error OracleStaleness(); // > 5m
     error TvlCapBreach();
@@ -85,6 +88,7 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
     error UserCollateralCapBreach();
     error ActiveHedgeCannotRemap();
     error TargetUserAlreadyInitialized();
+    error AmbiguousMarketSelection();
 
     modifier onlyCRE() {
         if (msg.sender != creCallbackOperator) revert OnlyCRE();
@@ -117,6 +121,133 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         }
     }
 
+    function _isPositionInitialized(Position storage pos) internal view returns (bool) {
+        return
+            pos.asset != address(0) ||
+            pos.notional > 0 ||
+            pos.lastUpdateTimestamp > 0 ||
+            pos.targetHedgeNotional > 0 ||
+            pos.currentHedgeNotional > 0 ||
+            pos.hasBorosHedge;
+    }
+
+    function _trackUserMarket(address user, address yuToken) internal {
+        if (yuToken == address(0) || userTrackedYuTokenIndexPlusOne[user][yuToken] != 0) {
+            return;
+        }
+        userTrackedYuTokens[user].push(yuToken);
+        userTrackedYuTokenIndexPlusOne[user][yuToken] = userTrackedYuTokens[user].length;
+        emit UserMarketTracked(user, yuToken);
+    }
+
+    function _untrackUserMarket(address user, address yuToken) internal {
+        uint256 indexPlusOne = userTrackedYuTokenIndexPlusOne[user][yuToken];
+        if (indexPlusOne == 0) return;
+
+        uint256 index = indexPlusOne - 1;
+        uint256 lastIndex = userTrackedYuTokens[user].length - 1;
+        if (index != lastIndex) {
+            address lastToken = userTrackedYuTokens[user][lastIndex];
+            userTrackedYuTokens[user][index] = lastToken;
+            userTrackedYuTokenIndexPlusOne[user][lastToken] = index + 1;
+        }
+
+        userTrackedYuTokens[user].pop();
+        delete userTrackedYuTokenIndexPlusOne[user][yuToken];
+        emit UserMarketUntracked(user, yuToken);
+    }
+
+    function _selectLatestTrackedYuToken(address user) internal view returns (address) {
+        uint256 length = userTrackedYuTokens[user].length;
+        if (length == 0) {
+            return address(0);
+        }
+        if (length == 1) {
+            return userTrackedYuTokens[user][0];
+        }
+
+        address latestToken = address(0);
+        uint256 latestTimestamp = 0;
+        for (uint256 i = 0; i < length; i++) {
+            address candidate = userTrackedYuTokens[user][i];
+            Position storage pos = userMarketPositions[user][candidate];
+            if (pos.lastUpdateTimestamp >= latestTimestamp) {
+                latestTimestamp = pos.lastUpdateTimestamp;
+                latestToken = candidate;
+            }
+        }
+        return latestToken;
+    }
+
+    function _resolveExistingPositionToken(address user, address preferredYuToken) internal view returns (address) {
+        uint256 length = userTrackedYuTokens[user].length;
+        if (preferredYuToken != address(0)) {
+            Position storage preferred = userMarketPositions[user][preferredYuToken];
+            if (_isPositionInitialized(preferred) || userTrackedYuTokenIndexPlusOne[user][preferredYuToken] != 0) {
+                return preferredYuToken;
+            }
+            if (length > 1) {
+                revert AmbiguousMarketSelection();
+            }
+        }
+        if (length == 0) {
+            return address(0);
+        }
+        if (length > 1) {
+            revert AmbiguousMarketSelection();
+        }
+        return userTrackedYuTokens[user][0];
+    }
+
+    function _sumCurrentHedgeNotional(address user, address exceptYuToken, uint256 replacement) internal view returns (uint256 total) {
+        address[] storage tracked = userTrackedYuTokens[user];
+        for (uint256 i = 0; i < tracked.length; i++) {
+            address marketToken = tracked[i];
+            if (marketToken == exceptYuToken) {
+                total += replacement;
+            } else {
+                total += userMarketPositions[user][marketToken].currentHedgeNotional;
+            }
+        }
+    }
+
+    function userTrackedMarkets(address user) external view returns (address[] memory) {
+        return userTrackedYuTokens[user];
+    }
+
+    function userPositions(address user) external view returns (
+        address asset_,
+        bool isLong_,
+        uint256 notional_,
+        uint256 leverage_,
+        bool hasBorosHedge_,
+        address yuToken_,
+        uint256 lastUpdateTimestamp_,
+        uint256 targetHedgeNotional_,
+        uint256 currentHedgeNotional_,
+        bool currentHedgeIsLong_,
+        bool targetHedgeIsLong_
+    ) {
+        address yuToken = _selectLatestTrackedYuToken(user);
+        if (yuToken == address(0)) {
+            return (address(0), false, 0, 0, false, address(0), 0, 0, 0, false, false);
+        }
+        Position storage pos = userMarketPositions[user][yuToken];
+        return (
+            pos.asset,
+            pos.isLong,
+            pos.notional,
+            pos.leverage,
+            pos.hasBorosHedge,
+            pos.yuToken,
+            pos.lastUpdateTimestamp,
+            pos.targetHedgeNotional,
+            pos.currentHedgeNotional,
+            pos.currentHedgeIsLong,
+            pos.targetHedgeIsLong
+        );
+    }
+
     function openHyperliquidPosition(
         bytes calldata order,
         uint256 userId,
@@ -125,6 +256,18 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         uint256 notional,
         uint256 leverage
     ) external {
+        openHyperliquidPositionForMarket(order, userId, asset, asset, isLong, notional, leverage);
+    }
+
+    function openHyperliquidPositionForMarket(
+        bytes calldata,
+        uint256 userId,
+        address yuToken,
+        address asset,
+        bool isLong,
+        uint256 notional,
+        uint256 leverage
+    ) public {
         // In a real implementation we would execute or queue EIP-712 order for off-chain submission
         // For MVP, we simply track the position metadata.
         address mappedUser = userIdToAddress[userId];
@@ -134,20 +277,22 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         address user = mappedUser == address(0) ? msg.sender : mappedUser;
         userIdToAddress[userId] = user;
 
-        Position storage existing = userPositions[user];
-        userPositions[user] = Position({
+        address marketToken = yuToken == address(0) ? asset : yuToken;
+        Position storage existing = userMarketPositions[user][marketToken];
+        userMarketPositions[user][marketToken] = Position({
             asset: asset,
             isLong: isLong,
             notional: notional,
             leverage: leverage,
             hasBorosHedge: existing.hasBorosHedge,
-            yuToken: existing.yuToken,
+            yuToken: marketToken,
             lastUpdateTimestamp: block.timestamp,
             targetHedgeNotional: notional,
             currentHedgeNotional: existing.currentHedgeNotional,
             currentHedgeIsLong: existing.currentHedgeIsLong,
             targetHedgeIsLong: existing.targetHedgeIsLong || !existing.hasBorosHedge
         });
+        _trackUserMarket(user, marketToken);
 
         emit HyperliquidPositionOpened(
             userId,
@@ -171,19 +316,73 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         address user = userIdToAddress[userId];
         require(user != address(0), "User not found");
 
-        Position storage pos = userPositions[user];
+        address marketToken = _resolveExistingPositionToken(user, address(0));
+        if (marketToken == address(0)) {
+            revert AmbiguousMarketSelection();
+        }
+        _syncHyperliquidPositionForMarket(
+            userId,
+            marketToken,
+            isLong,
+            notional,
+            leverage,
+            targetHedgeNotional,
+            targetHedgeIsLong,
+            oracleTimestamp
+        );
+    }
+
+    function syncHyperliquidPositionForMarket(
+        uint256 userId,
+        address yuToken,
+        bool isLong,
+        uint256 notional,
+        uint256 leverage,
+        uint256 targetHedgeNotional,
+        bool targetHedgeIsLong,
+        uint256 oracleTimestamp
+    ) external onlyCRE {
+        _syncHyperliquidPositionForMarket(
+            userId,
+            yuToken,
+            isLong,
+            notional,
+            leverage,
+            targetHedgeNotional,
+            targetHedgeIsLong,
+            oracleTimestamp
+        );
+    }
+
+    function _syncHyperliquidPositionForMarket(
+        uint256 userId,
+        address yuToken,
+        bool isLong,
+        uint256 notional,
+        uint256 leverage,
+        uint256 targetHedgeNotional,
+        bool targetHedgeIsLong,
+        uint256 oracleTimestamp
+    ) internal {
+        address user = userIdToAddress[userId];
+        require(user != address(0), "User not found");
+        require(yuToken != address(0), "Invalid yuToken");
+
+        Position storage pos = userMarketPositions[user][yuToken];
 
         _validateOracleTimestamp(oracleTimestamp);
 
         if (pos.asset == address(0)) {
             pos.asset = address(asset());
         }
+        pos.yuToken = yuToken;
         pos.isLong = isLong;
         pos.notional = notional;
         pos.leverage = leverage;
         pos.targetHedgeNotional = targetHedgeNotional;
         pos.targetHedgeIsLong = targetHedgeIsLong;
         pos.lastUpdateTimestamp = oracleTimestamp;
+        _trackUserMarket(user, yuToken);
 
         emit HyperliquidPositionSynced(
             userId,
@@ -205,32 +404,33 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         }
 
         if (previousUser != address(0)) {
-            Position storage previousPos = userPositions[previousUser];
-            if (
-                previousPos.hasBorosHedge ||
-                previousPos.currentHedgeNotional > 0
-            ) {
-                revert ActiveHedgeCannotRemap();
-            }
-
-            Position storage targetPos = userPositions[user];
-            if (
-                targetPos.asset != address(0) ||
-                targetPos.notional > 0 ||
-                targetPos.lastUpdateTimestamp > 0
-            ) {
+            address[] memory previousMarkets = userTrackedYuTokens[previousUser];
+            address[] storage targetMarkets = userTrackedYuTokens[user];
+            if (targetMarkets.length > 0) {
                 revert TargetUserAlreadyInitialized();
             }
 
-            if (
-                previousPos.asset != address(0) ||
-                previousPos.notional > 0 ||
-                previousPos.lastUpdateTimestamp > 0 ||
-                previousPos.targetHedgeNotional > 0 ||
-                previousPos.currentHedgeNotional > 0
-            ) {
-                userPositions[user] = previousPos;
-                delete userPositions[previousUser];
+            for (uint256 i = 0; i < previousMarkets.length; i++) {
+                address marketToken = previousMarkets[i];
+                Position storage previousPos = userMarketPositions[previousUser][marketToken];
+                if (previousPos.hasBorosHedge || previousPos.currentHedgeNotional > 0) {
+                    revert ActiveHedgeCannotRemap();
+                }
+                Position storage targetPos = userMarketPositions[user][marketToken];
+                if (_isPositionInitialized(targetPos)) {
+                    revert TargetUserAlreadyInitialized();
+                }
+            }
+
+            for (uint256 i = 0; i < previousMarkets.length; i++) {
+                address marketToken = previousMarkets[i];
+                Position storage previousPos = userMarketPositions[previousUser][marketToken];
+                if (_isPositionInitialized(previousPos)) {
+                    userMarketPositions[user][marketToken] = previousPos;
+                    delete userMarketPositions[previousUser][marketToken];
+                    _trackUserMarket(user, marketToken);
+                    _untrackUserMarket(previousUser, marketToken);
+                }
             }
         }
 
@@ -242,27 +442,31 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         // Anyone can trigger for themselves, or perhaps an admin unwinds
         require(msg.sender == user || msg.sender == owner(), "Unauthorized");
 
-        Position storage pos = userPositions[user];
-        if (pos.notional == 0) return;
+        address[] memory trackedMarkets = userTrackedYuTokens[user];
+        if (trackedMarkets.length == 0) return;
 
-        // Note: the off-chain system should be notified to close Hyperliquid position.
+        for (uint256 i = 0; i < trackedMarkets.length; i++) {
+            address marketToken = trackedMarkets[i];
+            Position storage pos = userMarketPositions[user][marketToken];
+            if (!_isPositionInitialized(pos)) {
+                continue;
+            }
 
-        if (pos.hasBorosHedge) {
-            address hedgeToken = pos.yuToken;
-            uint256 currentHedgeNotional = pos.currentHedgeNotional;
-            // Effects before interaction to prevent stale-state reentrancy paths.
-            pos.hasBorosHedge = false;
-            pos.yuToken = address(0);
-            pos.currentHedgeNotional = 0;
-            pos.currentHedgeIsLong = false;
+            if (pos.hasBorosHedge) {
+                address hedgeToken = pos.yuToken;
+                uint256 currentHedgeNotional = pos.currentHedgeNotional;
+                pos.hasBorosHedge = false;
+                pos.currentHedgeNotional = 0;
+                pos.currentHedgeIsLong = false;
 
-            borosRouter.closePosition(user, hedgeToken);
-            emit BorosHedgeClosed(user, hedgeToken, currentHedgeNotional);
+                borosRouter.closePosition(user, hedgeToken);
+                emit BorosHedgeClosed(user, hedgeToken, currentHedgeNotional);
+            }
+
+            emit HyperliquidPositionClosed(user);
+            delete userMarketPositions[user][marketToken];
+            _untrackUserMarket(user, marketToken);
         }
-
-        emit HyperliquidPositionClosed(user);
-
-        delete userPositions[user];
     }
 
     function executeHedge(
@@ -276,10 +480,37 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
         uint256 oracleTimestamp,
         bytes32 proofHash
     ) external onlyCRE nonReentrant {
+        _executeHedgeForMarket(
+            userId,
+            yuToken,
+            shouldHedge,
+            predictedApr,
+            confidenceBp,
+            borosApr,
+            hedgeNotional,
+            oracleTimestamp,
+            proofHash
+        );
+    }
+
+    function _executeHedgeForMarket(
+        uint256 userId,
+        address yuToken,
+        bool shouldHedge,
+        int256 predictedApr,
+        uint256 confidenceBp,
+        int256 borosApr,
+        uint256 hedgeNotional,
+        uint256 oracleTimestamp,
+        bytes32 proofHash
+    ) internal {
         address user = userIdToAddress[userId];
         require(user != address(0), "User not found");
-
-        Position storage pos = userPositions[user];
+        address marketToken = _resolveExistingPositionToken(user, yuToken);
+        if (marketToken == address(0)) {
+            revert AmbiguousMarketSelection();
+        }
+        Position storage pos = userMarketPositions[user][marketToken];
         require(pos.notional > 0, "No open position");
 
         // 1. Check Oracle Staleness Guard (>5m)
@@ -306,7 +537,8 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
             }
 
             uint256 userAssetBalance = convertToAssets(balanceOf(user));
-            if (hedgeTarget > userAssetBalance) {
+            uint256 aggregateCurrentHedge = _sumCurrentHedgeNotional(user, marketToken, hedgeTarget);
+            if (aggregateCurrentHedge > userAssetBalance) {
                 revert UserCollateralCapBreach();
             }
 
@@ -329,7 +561,6 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
                 uint256 currentHedgeNotional = pos.currentHedgeNotional;
 
                 pos.hasBorosHedge = false;
-                pos.yuToken = address(0);
                 pos.currentHedgeNotional = 0;
                 pos.currentHedgeIsLong = false;
 
@@ -339,12 +570,12 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
 
             if (!hedgeConfigMatches && hedgeTarget > 0) {
                 pos.hasBorosHedge = true;
-                pos.yuToken = yuToken;
+                pos.yuToken = marketToken;
                 pos.currentHedgeNotional = hedgeTarget;
                 pos.currentHedgeIsLong = hedgeIsLong;
 
-                borosRouter.openPosition(user, yuToken, hedgeTarget, hedgeIsLong);
-                emit BorosHedgeOpened(user, yuToken, hedgeTarget, hedgeIsLong);
+                borosRouter.openPosition(user, marketToken, hedgeTarget, hedgeIsLong);
+                emit BorosHedgeOpened(user, marketToken, hedgeTarget, hedgeIsLong);
             }
         } else if (!shouldHedge && pos.hasBorosHedge) {
             // Close hedge
@@ -352,7 +583,6 @@ contract kYUteVault is ERC4626, Ownable, ReentrancyGuard {
             uint256 currentHedgeNotional = pos.currentHedgeNotional;
             // Effects before interaction to prevent stale-state reentrancy paths.
             pos.hasBorosHedge = false;
-            pos.yuToken = address(0);
             pos.currentHedgeNotional = 0;
             pos.currentHedgeIsLong = false;
 
