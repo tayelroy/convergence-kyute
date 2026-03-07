@@ -864,7 +864,10 @@ type AgentSidecarSnapshot = {
     source: string;
   };
   strategy: {
+    enabled: boolean;
     mode: HedgeMode;
+    entryThresholdBp?: number;
+    exitThresholdBp?: number;
     source: string;
     warning?: string;
   };
@@ -1424,8 +1427,8 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
     const http = new HTTPClient();
     const config = runtime.config;
     runtime.log("kyute-agent cron trigger entered");
-    const entryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
-    const exitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
+    const configuredEntryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
+    const configuredExitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
     const windowHours = config.windowHours ?? WINDOW_HOURS;
     const configuredHedgeMode = config.hedgeMode ?? "adverse_only";
     const borosOiFeeBp = config.borosOiFeeBp ?? DEFAULT_BOROS_OI_FEE_BP;
@@ -1486,12 +1489,17 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       const mappedUser = snapshot.vault.mappedUser;
       const positionState = deserializeVaultPosition(snapshot.vault.position);
       const hedgeMode = snapshot.strategy.mode;
+      const strategyEnabled = snapshot.strategy.enabled;
+      const entryThresholdBp = snapshot.strategy.entryThresholdBp ?? configuredEntryThresholdBp;
+      const exitThresholdBp = snapshot.strategy.exitThresholdBp ?? configuredExitThresholdBp;
       const funding = snapshot.funding;
       const borosQuote = snapshot.borosQuote;
       const position = snapshot.position;
 
       runtime.log(`${prefix} Resolved identity source=${hlWallet.source} userId=${userId} wallet=${hlWallet.address}`);
-      runtime.log(`${prefix} Using strategy mode ${hedgeMode} from ${snapshot.strategy.source}`);
+      runtime.log(
+        `${prefix} Using strategy mode ${hedgeMode} enabled=${strategyEnabled} entryBp=${entryThresholdBp} exitBp=${exitThresholdBp} from ${snapshot.strategy.source}`,
+      );
       if (snapshot.strategy.warning) {
         runtime.log(`${prefix} Strategy mode warning: ${snapshot.strategy.warning}`);
       }
@@ -1525,7 +1533,7 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
       const borosAprBp = Math.round(borosApr * 10_000);
       const confidenceBp = 10_000;
       const livePositionNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
-      const decision = computeHedgePolicy({
+      const baseDecision = computeHedgePolicy({
         positionSide: position.positionSide,
         averageFundingBp: funding.averageFundingBp,
         borosImpliedAprBp: borosAprBp,
@@ -1538,6 +1546,13 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
         oiFeeBp: borosOiFeeBp,
         mode: hedgeMode,
       });
+      const decision = strategyEnabled
+        ? baseDecision
+        : {
+            ...baseDecision,
+            shouldHedge: false,
+            reason: `market disabled by saved strategy config source=${snapshot.strategy.source}`,
+          };
       const predictedAprBp = Math.round(decision.carrySourceAprBp);
       const contractBorosAprBp = Math.round(decision.carryCostAprBp);
       const executionPlan = buildHedgeExecutionPlan({
