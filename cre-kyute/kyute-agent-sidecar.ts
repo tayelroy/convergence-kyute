@@ -31,17 +31,19 @@ const DEFAULT_CALLBACK_PRIVATE_KEY =
     process.env.ANVIL_PRIVATE_KEY?.trim() ||
     process.env.PRIVATE_KEY?.trim() ||
     "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d") as `0x${string}`;
-const HL_COIN = "ETH";
-const PAIR = "ETHUSDC";
+const DEFAULT_HL_COIN = "ETH";
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
+const DEFAULT_ETH_YU_TOKEN = "0x0000000000000000000000000000000000000001" as const;
+const DEFAULT_BTC_YU_TOKEN = "0x0000000000000000000000000000000000000002" as const;
 
 const KYUTE_VAULT_ABI = [
   {
     type: "function",
-    name: "syncHyperliquidPosition",
+    name: "syncHyperliquidPositionForMarket",
     stateMutability: "nonpayable",
     inputs: [
       { name: "userId", type: "uint256" },
+      { name: "yuToken", type: "address" },
       { name: "isLong", type: "bool" },
       { name: "notional", type: "uint256" },
       { name: "leverage", type: "uint256" },
@@ -84,9 +86,12 @@ const KYUTE_VAULT_ABI = [
   },
   {
     type: "function",
-    name: "userPositions",
+    name: "userMarketPositions",
     stateMutability: "view",
-    inputs: [{ name: "", type: "address" }],
+    inputs: [
+      { name: "", type: "address" },
+      { name: "", type: "address" },
+    ],
     outputs: [
       { name: "asset", type: "address" },
       { name: "isLong", type: "bool" },
@@ -102,6 +107,16 @@ const KYUTE_VAULT_ABI = [
     ],
   },
 ] as const;
+
+const getDefaultYuTokenForCoin = (coin: string): Address => {
+  switch (coin.toUpperCase()) {
+    case "BTC":
+      return DEFAULT_BTC_YU_TOKEN;
+    case "ETH":
+    default:
+      return DEFAULT_ETH_YU_TOKEN;
+  }
+};
 
 type HyperliquidMetaAndCtxs = [
   { universe: Array<{ name: string }> },
@@ -248,11 +263,11 @@ const fetchPredictedFundingBpNative = async (coin: string, baseUrl: string): Pro
   return Math.round(fundingRate * 24 * 365 * 10_000);
 };
 
-const fetchAverageFundingBpNative = async (baseUrl: string, windowHours: number) => {
+const fetchAverageFundingBpNative = async (baseUrl: string, windowHours: number, coin: string) => {
   const startTime = Date.now() - windowHours * 60 * 60 * 1000;
   const data = await postJson<FundingHistoryEntry[]>(baseUrl, {
     type: "fundingHistory",
-    coin: HL_COIN,
+    coin,
     startTime,
   });
 
@@ -265,7 +280,7 @@ const fetchAverageFundingBpNative = async (baseUrl: string, windowHours: number)
 
   if (points.length === 0) {
     return {
-      averageFundingBp: await fetchPredictedFundingBpNative(HL_COIN, baseUrl),
+      averageFundingBp: await fetchPredictedFundingBpNative(coin, baseUrl),
       observedFundingPoints: 0,
       latestFundingTimestampMs: Date.now(),
     };
@@ -287,6 +302,7 @@ const fetchAverageFundingBpNative = async (baseUrl: string, windowHours: number)
 const fetchHlPositionSnapshotNative = async (
   baseUrl: string,
   userAddress: string,
+  coin: string,
   useMarkPrice: boolean,
 ) => {
   const [metaAndCtxs, state] = await Promise.all([
@@ -298,18 +314,19 @@ const fetchHlPositionSnapshotNative = async (
   ]);
 
   const [meta, contexts] = metaAndCtxs;
-  const ethIndex = meta.universe.findIndex((entry) => entry.name === HL_COIN);
-  if (ethIndex < 0) throw new Error(`Unable to locate ${HL_COIN} in Hyperliquid universe`);
+  const pair = `${coin}USDC`;
+  const coinIndex = meta.universe.findIndex((entry) => entry.name === coin);
+  if (coinIndex < 0) throw new Error(`Unable to locate ${coin} in Hyperliquid universe`);
 
-  const markPxRaw = contexts[ethIndex]?.markPx ?? contexts[ethIndex]?.midPx;
+  const markPxRaw = contexts[coinIndex]?.markPx ?? contexts[coinIndex]?.midPx;
   const markPrice = Number(markPxRaw ?? 0);
   if (!Number.isFinite(markPrice) || markPrice <= 0) {
-    throw new Error(`Invalid mark price for ${PAIR}: ${String(markPxRaw)}`);
+    throw new Error(`Invalid mark price for ${pair}: ${String(markPxRaw)}`);
   }
 
   const positionEntry = (state.assetPositions ?? []).find((entry) => {
-    const coin = String(entry.position?.coin ?? "");
-    return coin.toUpperCase() === HL_COIN;
+    const coinSymbol = String(entry.position?.coin ?? "");
+    return coinSymbol.toUpperCase() === coin.toUpperCase();
   });
 
   const signedSize = Number(positionEntry?.position?.szi ?? 0);
@@ -411,6 +428,7 @@ const getClients = (rpcUrl: string, privateKey?: `0x${string}`) => {
 
 const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> => {
   const url = new URL(request.url);
+  const coin = (getOptionalString(url.searchParams.get("coin")) ?? DEFAULT_HL_COIN).toUpperCase();
   const walletAddress = getRequiredAddress(url.searchParams.get("walletAddress"), "walletAddress");
   const vaultAddress = getOptionalAddress(url.searchParams.get("vaultAddress"));
   const borosMarketAddress = getOptionalAddress(url.searchParams.get("borosMarketAddress"));
@@ -422,7 +440,8 @@ const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> =>
   const useMarkPrice = getBoolean(url.searchParams.get("useMarkPrice"), false);
   const windowHours = getNumber(url.searchParams.get("windowHours"), 1);
   const marketKey = getOptionalString(url.searchParams.get("marketKey"));
-  const assetSymbol = getOptionalString(url.searchParams.get("assetSymbol")) ?? HL_COIN;
+  const assetSymbol = getOptionalString(url.searchParams.get("assetSymbol")) ?? coin;
+  const yuToken = getOptionalAddress(url.searchParams.get("yuToken")) ?? getDefaultYuTokenForCoin(coin);
   const venue = getOptionalString(url.searchParams.get("venue")) ?? "HlPerp";
   const borosMarketId = Math.max(1, Math.floor(getNumber(url.searchParams.get("borosMarketId"), DEFAULT_BOROS_MARKET_ID)));
   const borosCoreApiBaseUrl =
@@ -459,8 +478,8 @@ const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> =>
       ? publicClient.readContract({
           address: vaultAddress,
           abi: KYUTE_VAULT_ABI,
-          functionName: "userPositions",
-          args: [identity.record.walletAddress],
+          functionName: "userMarketPositions",
+          args: [identity.record.walletAddress, yuToken],
         })
       : Promise.resolve(null),
     resolveUserHedgeMode({
@@ -475,9 +494,9 @@ const buildSnapshot = async (request: Request): Promise<AgentSnapshotPayload> =>
       supabaseUrl,
       supabaseKey,
     }),
-    fetchAverageFundingBpNative(hlFundingUrl, windowHours),
+    fetchAverageFundingBpNative(hlFundingUrl, windowHours, coin),
     fetchBorosAprSnapshotNative(borosCoreApiBaseUrl, borosMarketId),
-    fetchHlPositionSnapshotNative(hlPositionUrl, identity.record.walletAddress, useMarkPrice),
+    fetchHlPositionSnapshotNative(hlPositionUrl, identity.record.walletAddress, coin, useMarkPrice),
   ]);
 
   return {
@@ -535,8 +554,8 @@ const executeHedge = async (request: Request): Promise<Response> => {
     publicClient.readContract({
       address: payload.vaultAddress,
       abi: KYUTE_VAULT_ABI,
-      functionName: "userPositions",
-      args: [payload.walletAddress],
+      functionName: "userMarketPositions",
+      args: [payload.walletAddress, payload.yuToken],
     }),
   ]);
 
@@ -571,9 +590,10 @@ const executeHedge = async (request: Request): Promise<Response> => {
       to: payload.vaultAddress,
       data: encodeFunctionData({
         abi: KYUTE_VAULT_ABI,
-        functionName: "syncHyperliquidPosition",
+        functionName: "syncHyperliquidPositionForMarket",
         args: [
           userId,
+          payload.yuToken,
           payload.positionSide === "long",
           livePositionNotionalWei,
           leverageForSync,

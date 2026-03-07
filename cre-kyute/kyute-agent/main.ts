@@ -785,6 +785,13 @@ type Config = {
   agentSidecarUrl?: string;
   userId?: number;
   yuToken?: string;
+  markets?: Array<{
+    coin?: string;
+    pair?: string;
+    yuToken?: string;
+    borosMarketId?: number;
+    borosMarketAddress?: string;
+  }>;
   supabaseUrl?: string;
   hlAddress?: string;
   hlTestnet?: boolean;
@@ -802,12 +809,30 @@ type Config = {
   borosMarketId?: number;
   borosMarketAddress?: string;
   borosCoreApiUrl?: string;
+  marketCoin?: string;
+  marketPair?: string;
   windowHours?: number;
   callbackPrivateKey?: `0x${string}`;
   rpcUrl?: string;
   enableReportWrite?: boolean;
   executeOnchain?: boolean;
 };
+
+type AgentMarketConfig = {
+  coin: string;
+  pair: string;
+  yuToken: Address;
+  borosMarketId: number;
+  borosMarketAddress?: Address;
+  marketKey: string;
+};
+
+type MarketExecutionOutcome =
+  | "OPEN_HEDGE_EXECUTED"
+  | "CLOSE_HEDGE_EXECUTED"
+  | "HEDGE_ALREADY_IN_SYNC"
+  | "NO_HEDGE_REQUIRED"
+  | "EXECUTION_PENDING";
 
 type FundingHistoryEntry = {
   fundingRate?: number | string;
@@ -861,8 +886,10 @@ type AgentSidecarSnapshot = {
   };
 };
 
-const PAIR = "ETHUSDC";
-const HL_COIN = "ETH";
+const DEFAULT_MARKET_PAIR = "ETHUSDC";
+const DEFAULT_MARKET_COIN = "ETH";
+const DEFAULT_ETH_YU_TOKEN = "0x0000000000000000000000000000000000000001";
+const DEFAULT_BTC_YU_TOKEN = "0x0000000000000000000000000000000000000002";
 const WINDOW_HOURS = 1;
 const MIN_CONFIDENCE_BP = 6000;
 const DEFAULT_ENTRY_THRESHOLD_BP = 40;
@@ -1022,10 +1049,90 @@ const deserializeVaultPosition = (
   ] as const;
 };
 
+const defaultYuTokenForCoin = (coin: string): Address => {
+  switch (coin.toUpperCase()) {
+    case "BTC":
+      return DEFAULT_BTC_YU_TOKEN as Address;
+    case "ETH":
+    default:
+      return DEFAULT_ETH_YU_TOKEN as Address;
+  }
+};
+
+const normalizeAgentMarkets = (config: Config): AgentMarketConfig[] => {
+  const configuredMarkets = Array.isArray(config.markets) && config.markets.length > 0
+    ? config.markets
+    : [
+        {
+          coin: config.marketCoin,
+          pair: config.marketPair,
+          yuToken: config.yuToken,
+          borosMarketId: config.borosMarketId,
+          borosMarketAddress: config.borosMarketAddress,
+        },
+      ];
+
+  const normalized = configuredMarkets.map((market, index) => {
+    const coin = String(market.coin ?? DEFAULT_MARKET_COIN).trim().toUpperCase() || DEFAULT_MARKET_COIN;
+    const pair = String(market.pair ?? `${coin}USDC`).trim().toUpperCase() || `${coin}USDC`;
+    const yuTokenRaw = String(market.yuToken ?? defaultYuTokenForCoin(coin)).trim();
+    if (!/^0x[0-9a-fA-F]{40}$/.test(yuTokenRaw)) {
+      throw new Error(`Invalid yuToken for market[${index}] coin=${coin}: ${yuTokenRaw}`);
+    }
+    const borosMarketId = Number.isFinite(market.borosMarketId)
+      ? Math.max(1, Math.floor(market.borosMarketId as number))
+      : DEFAULT_BOROS_MARKET_ID;
+    const borosMarketAddress =
+      market.borosMarketAddress && /^0x[0-9a-fA-F]{40}$/.test(market.borosMarketAddress)
+        ? (market.borosMarketAddress as Address)
+        : undefined;
+    const marketScope = borosMarketAddress?.toLowerCase() ?? `market-${borosMarketId}`;
+    return {
+      coin,
+      pair,
+      yuToken: yuTokenRaw as Address,
+      borosMarketId,
+      borosMarketAddress,
+      marketKey: `${coin.toLowerCase()}:hlperp:${marketScope}`,
+    };
+  });
+
+  const seenTokens = new Set<string>();
+  for (const market of normalized) {
+    const key = market.yuToken.toLowerCase();
+    if (seenTokens.has(key)) {
+      throw new Error(`Duplicate yuToken configured across markets: ${market.yuToken}`);
+    }
+    seenTokens.add(key);
+  }
+
+  return normalized;
+};
+
+const resolveMarketExecutionOutcome = (args: {
+  shouldHedge: boolean;
+  action: "OPEN_HEDGE" | "CLOSE_HEDGE" | "SKIP";
+  executed: boolean;
+  executeOnchain: boolean;
+}): MarketExecutionOutcome => {
+  if (!args.executeOnchain && args.action !== "SKIP") {
+    return "EXECUTION_PENDING";
+  }
+  if (args.executed) {
+    return args.action === "CLOSE_HEDGE" ? "CLOSE_HEDGE_EXECUTED" : "OPEN_HEDGE_EXECUTED";
+  }
+  if (args.shouldHedge) {
+    return "HEDGE_ALREADY_IN_SYNC";
+  }
+  return "NO_HEDGE_REQUIRED";
+};
+
 const fetchAgentSnapshotViaSidecar = (
   requester: HTTPSendRequester,
   args: {
     baseUrl: string;
+    coin: string;
+    yuToken: Address;
     walletAddress: Address;
     vaultAddress?: Address;
     marketKey: string;
@@ -1043,6 +1150,8 @@ const fetchAgentSnapshotViaSidecar = (
   },
 ): AgentSidecarSnapshot => {
   const query = buildQueryString({
+    coin: args.coin,
+    yuToken: args.yuToken,
     walletAddress: args.walletAddress,
     marketKey: args.marketKey,
     assetSymbol: args.assetSymbol,
@@ -1167,13 +1276,14 @@ const fetchPredictedFundingBp = (
 
 const fetchAverageFundingBp = (
   requester: HTTPSendRequester,
+  coin: string,
   baseUrl: string,
   windowHours: number,
 ): { averageFundingBp: number; observedFundingPoints: number; latestFundingTimestampMs: number } => {
   const startTime = Date.now() - windowHours * 60 * 60 * 1000;
   const payload = JSON.stringify({
     type: "fundingHistory",
-    coin: HL_COIN,
+    coin,
     startTime,
   });
 
@@ -1205,7 +1315,7 @@ const fetchAverageFundingBp = (
   );
 
   if (rates.length === 0) {
-    const fallbackBp = fetchPredictedFundingBp(requester, HL_COIN, baseUrl);
+    const fallbackBp = fetchPredictedFundingBp(requester, coin, baseUrl);
     return {
       averageFundingBp: fallbackBp,
       observedFundingPoints: 0,
@@ -1225,6 +1335,8 @@ const fetchAverageFundingBp = (
 const fetchHlPositionSnapshot = (
   requester: HTTPSendRequester,
   baseUrl: string,
+  coin: string,
+  pair: string,
   userAddress: string,
   useMarkPrice: boolean,
 ): { positionSide: PositionSide; hlSize: number; markPrice: number; hedgeNotional: number } => {
@@ -1253,18 +1365,18 @@ const fetchHlPositionSnapshot = (
     assetPositions?: Array<{ position?: Record<string, unknown> }>;
   };
 
-  const ethIndex = meta.universe.findIndex((entry) => entry.name === HL_COIN);
-  if (ethIndex < 0) throw new Error(`Unable to locate ${HL_COIN} in Hyperliquid universe`);
+  const coinIndex = meta.universe.findIndex((entry) => entry.name === coin);
+  if (coinIndex < 0) throw new Error(`Unable to locate ${coin} in Hyperliquid universe`);
 
-  const markPxRaw = contexts[ethIndex]?.markPx ?? contexts[ethIndex]?.midPx;
+  const markPxRaw = contexts[coinIndex]?.markPx ?? contexts[coinIndex]?.midPx;
   const markPrice = Number(markPxRaw ?? 0);
   if (!Number.isFinite(markPrice) || markPrice <= 0) {
-    throw new Error(`Invalid mark price for ${PAIR}: ${String(markPxRaw)}`);
+    throw new Error(`Invalid mark price for ${pair}: ${String(markPxRaw)}`);
   }
 
   const positionEntry = (state.assetPositions ?? []).find((entry) => {
-    const coin = String(entry.position?.coin ?? "");
-    return coin.toUpperCase() === HL_COIN;
+    const coinSymbol = String(entry.position?.coin ?? "");
+    return coinSymbol.toUpperCase() === coin.toUpperCase();
   });
 
   const signedSize = Number(positionEntry?.position?.szi ?? 0);
@@ -1278,6 +1390,8 @@ const fetchHlPositionSnapshot = (
 const fetchLiveInputSnapshot = (
   requester: HTTPSendRequester,
   args: {
+    coin: string;
+    pair: string;
     hlFundingUrl: string;
     hlPositionUrl: string;
     windowHours: number;
@@ -1291,11 +1405,13 @@ const fetchLiveInputSnapshot = (
   borosQuote: BorosAprSnapshot;
   position: { positionSide: PositionSide; hlSize: number; markPrice: number; hedgeNotional: number };
 } => {
-  const funding = fetchAverageFundingBp(requester, args.hlFundingUrl, args.windowHours);
+  const funding = fetchAverageFundingBp(requester, args.coin, args.hlFundingUrl, args.windowHours);
   const borosQuote = fetchBorosAprSnapshot(requester, args.borosCoreApiBaseUrl, args.borosMarketId);
   const position = fetchHlPositionSnapshot(
     requester,
     args.hlPositionUrl,
+    args.coin,
+    args.pair,
     args.userAddress,
     args.useMarkPrice,
   );
@@ -1308,10 +1424,6 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
     const http = new HTTPClient();
     const config = runtime.config;
     runtime.log("kyute-agent cron trigger entered");
-    const supabaseUrl = config.supabaseUrl?.trim() || undefined;
-    const supabaseKey = readOptionalSecret(runtime, "SUPABASE_KEY") ?? undefined;
-    const supabaseFetch = createSupabaseRestFetch(http, runtime);
-    const rpcFetch = createRpcTextFetch(http, runtime);
     const entryThresholdBp = config.entryThresholdBp ?? config.thresholdBp ?? DEFAULT_ENTRY_THRESHOLD_BP;
     const exitThresholdBp = config.exitThresholdBp ?? DEFAULT_EXIT_THRESHOLD_BP;
     const windowHours = config.windowHours ?? WINDOW_HOURS;
@@ -1320,443 +1432,220 @@ const onCronTrigger = async (runtime: Runtime<Config>) => {
     const useMarkPrice = resolveUseMarkPrice(config);
     const hlFundingUrl = resolveHlUrl(config, "funding");
     const hlPositionUrl = resolveHlUrl(config, "position");
-    const yuToken = (config.yuToken ?? "0x0000000000000000000000000000000000000001") as `0x${string}`;
     const executeOnchain = config.executeOnchain ?? false;
     const enableReportWrite = config.enableReportWrite ?? false;
     const rpcUrl = config.rpcUrl ?? DEFAULT_ANVIL_RPC_URL;
     const vaultAddress = config.vaultAddress as `0x${string}`;
     const agentSidecarUrl = config.agentSidecarUrl?.trim() || undefined;
-    const marketKey = `${HL_COIN.toLowerCase()}:hlperp:${String(config.borosMarketAddress ?? "").toLowerCase() || "default"}`;
-    const borosMarketId = Number.isFinite(config.borosMarketId)
-      ? Math.max(1, Math.floor(config.borosMarketId as number))
-      : DEFAULT_BOROS_MARKET_ID;
     const borosCoreApiBaseUrl =
       config.borosCoreApiUrl?.trim() || DEFAULT_BOROS_CORE_API_BASE_URL;
+    const markets = normalizeAgentMarkets(config);
 
     const hasVaultAddress =
       /^0x[0-9a-fA-F]{40}$/.test(vaultAddress) &&
       vaultAddress !== "0x0000000000000000000000000000000000000000";
-    let userId: bigint;
-    let hlWallet: { address: Address; source: string };
-    let mappedUser = ZERO_ADDRESS;
-    let positionState: readonly [Address, boolean, bigint, bigint, boolean, Address, bigint, bigint, bigint, boolean, boolean] | null =
-      null;
-    let hedgeMode: HedgeMode;
-    let funding: { averageFundingBp: number; observedFundingPoints: number; latestFundingTimestampMs: number };
-    let borosQuote: BorosAprSnapshot;
-    let position: { positionSide: PositionSide; hlSize: number; markPrice: number; hedgeNotional: number };
+    if (!agentSidecarUrl) {
+      throw new Error("kyute-agent requires agentSidecarUrl for recurring execution");
+    }
+    if (enableReportWrite) {
+      throw new Error("enableReportWrite is not supported in kyute-agent sidecar mode");
+    }
 
-    if (agentSidecarUrl) {
-      runtime.log(`Using agent sidecar ${agentSidecarUrl}`);
+    runtime.log(`Using agent sidecar ${agentSidecarUrl}`);
+    if (hlFundingUrl !== hlPositionUrl) {
+      runtime.log(`Using separate HL endpoints fundingUrl=${hlFundingUrl} positionUrl=${hlPositionUrl}`);
+    }
+    const marketOutcomes: string[] = [];
+
+    for (const market of markets) {
+      const prefix = `[${market.coin}]`;
       const snapshot = await http
         .sendRequest(runtime, fetchAgentSnapshotViaSidecar, consensusIdenticalAggregation())({
           baseUrl: agentSidecarUrl,
+          coin: market.coin,
+          yuToken: market.yuToken,
           walletAddress: (config.hlAddress ?? ZERO_ADDRESS) as Address,
           vaultAddress: hasVaultAddress ? vaultAddress : undefined,
-          marketKey,
-          assetSymbol: HL_COIN,
+          marketKey: market.marketKey,
+          assetSymbol: market.coin,
           venue: "HlPerp",
-          borosMarketAddress: config.borosMarketAddress,
+          borosMarketAddress: market.borosMarketAddress,
           fallbackMode: configuredHedgeMode,
           hlFundingUrl,
           hlPositionUrl,
           useMarkPrice,
           windowHours,
           borosCoreApiBaseUrl,
-          borosMarketId,
+          borosMarketId: market.borosMarketId,
           rpcUrl,
         })
         .result();
 
-      userId = BigInt(snapshot.identity.userId);
-      hlWallet = { address: snapshot.identity.walletAddress, source: snapshot.identity.source };
-      mappedUser = snapshot.vault.mappedUser;
-      positionState = deserializeVaultPosition(snapshot.vault.position);
-      hedgeMode = snapshot.strategy.mode;
-      funding = snapshot.funding;
-      borosQuote = snapshot.borosQuote;
-      position = snapshot.position;
+      const userId = BigInt(snapshot.identity.userId);
+      const hlWallet = { address: snapshot.identity.walletAddress, source: snapshot.identity.source };
+      const mappedUser = snapshot.vault.mappedUser;
+      const positionState = deserializeVaultPosition(snapshot.vault.position);
+      const hedgeMode = snapshot.strategy.mode;
+      const funding = snapshot.funding;
+      const borosQuote = snapshot.borosQuote;
+      const position = snapshot.position;
 
-      runtime.log(`Resolved identity source=${hlWallet.source} userId=${userId} wallet=${hlWallet.address}`);
-      runtime.log(`Using strategy mode ${hedgeMode} from ${snapshot.strategy.source}`);
+      runtime.log(`${prefix} Resolved identity source=${hlWallet.source} userId=${userId} wallet=${hlWallet.address}`);
+      runtime.log(`${prefix} Using strategy mode ${hedgeMode} from ${snapshot.strategy.source}`);
       if (snapshot.strategy.warning) {
-        runtime.log(`Strategy mode warning: ${snapshot.strategy.warning}`);
+        runtime.log(`${prefix} Strategy mode warning: ${snapshot.strategy.warning}`);
       }
-      runtime.log(`Decoded mapped user address=${mappedUser}`);
+      runtime.log(`${prefix} Decoded mapped user address=${mappedUser}`);
       runtime.log(
-        `Fetched live inputs fundingBp=${funding.averageFundingBp} borosMarketId=${borosQuote.marketId} hlSize=${position.hlSize.toFixed(6)} side=${position.positionSide}`,
+        `${prefix} Fetched live inputs fundingBp=${funding.averageFundingBp} borosMarketId=${borosQuote.marketId} hlSize=${position.hlSize.toFixed(6)} side=${position.positionSide}`,
       );
-    } else {
-      runtime.log(
-        `Identity config supabaseUrl=${supabaseUrl ?? "<missing>"} supabaseKeyPresent=${supabaseKey ? "true" : "false"} configuredWallet=${
-          config.hlAddress ?? "<missing>"
-        }`,
-      );
-      const identity = await resolveAgentIdentity({
-        config,
-        vaultAddress: hasVaultAddress ? vaultAddress : undefined,
-        supabaseUrl,
-        supabaseKey,
-        supabaseFetch,
-        logger: (message) => runtime.log(message),
-      });
-      userId = identity.userId;
-      hlWallet = { address: identity.walletAddress, source: identity.source };
-      runtime.log(`Resolved identity source=${identity.source} userId=${userId} wallet=${identity.walletAddress}`);
-      if (hasVaultAddress) {
-        runtime.log("Reading vault mapping and user position via batched raw eth_call");
-        const vaultSnapshot = await readVaultMappingAndPosition({
-          rpcUrl,
-          vaultAddress,
-          userId,
-          userAddress: identity.walletAddress,
-          rpcFetch,
-        });
-        runtime.log(`Vault mapping batch raw result=${vaultSnapshot.mappingRawResult}`);
-        runtime.log(`Decoded mapped user address=${vaultSnapshot.mappedAddress}`);
-        runtime.log(`Vault userPositions batch raw result=${vaultSnapshot.positionRawResult}`);
-        mappedUser = vaultSnapshot.mappedAddress;
-        positionState = vaultSnapshot.position;
-      }
 
-      const strategyMode = await resolveUserHedgeMode({
-        userId,
-        walletAddress: hlWallet.address,
-        vaultAddress: hasVaultAddress ? vaultAddress : undefined,
-        marketKey,
-        assetSymbol: HL_COIN,
-        venue: "HlPerp",
-        borosMarketAddress: config.borosMarketAddress,
-        fallbackMode: configuredHedgeMode,
-        logger: (message) => runtime.log(message),
-        supabaseUrl,
-        supabaseKey,
-        supabaseFetch,
-      });
-      hedgeMode = strategyMode.mode;
-      runtime.log(`Using strategy mode ${hedgeMode} from ${strategyMode.source}`);
-      if (strategyMode.warning) {
-        runtime.log(`Strategy mode warning: ${strategyMode.warning}`);
-      }
-
-      const liveInputs = await http
-        .sendRequest(runtime, fetchLiveInputSnapshot, consensusIdenticalAggregation())({
-          hlFundingUrl,
-          hlPositionUrl,
-          windowHours,
-          userAddress: hlWallet.address,
-          useMarkPrice,
-          borosCoreApiBaseUrl,
-          borosMarketId,
-        })
-        .result();
-      funding = liveInputs.funding;
-      borosQuote = liveInputs.borosQuote;
-      position = liveInputs.position;
-      runtime.log(
-        `Fetched live inputs fundingBp=${funding.averageFundingBp} borosMarketId=${borosQuote.marketId} hlSize=${position.hlSize.toFixed(6)} side=${position.positionSide}`,
-      );
-    }
-    const signerPk = config.callbackPrivateKey ?? DEFAULT_ANVIL_PRIVATE_KEY;
-    const canUseDirectSigner = executeOnchain && hasVaultAddress && /^0x[0-9a-fA-F]{64}$/.test(signerPk);
-    const directAccount = canUseDirectSigner ? privateKeyToAccount(signerPk as `0x${string}`) : null;
-    if (hasVaultAddress && mappedUser === ZERO_ADDRESS) {
-      throw new Error(
-        `Vault mapping missing; run syncUserAddress during enrollment. userId=${userId} wallet=${hlWallet.address} vault=${vaultAddress}`,
-      );
-    } else if (hasVaultAddress && mappedUser.toLowerCase() !== hlWallet.address.toLowerCase()) {
-      throw new Error(
-        `Vault mapping mismatch for userId=${userId}: onchain=${mappedUser} supabase=${hlWallet.address}`,
-      );
-    }
-    const hasMappedUser = mappedUser !== "0x0000000000000000000000000000000000000000";
-    if (hlFundingUrl !== hlPositionUrl) {
-      runtime.log(`Using separate HL endpoints fundingUrl=${hlFundingUrl} positionUrl=${hlPositionUrl}`);
-    }
-  const oracleTimestamp = resolveFreshOracleTimestamp(funding.latestFundingTimestampMs);
-  if (borosQuote.apr === null) {
-    throw new Error(`Boros APR missing for marketId=${borosQuote.marketId} field=${borosQuote.field}`);
-  }
-  const borosApr = borosQuote.apr;
-  const borosAprBp = Math.round(borosApr * 10_000);
-  if (oracleTimestamp.source !== "latest_point") {
-    runtime.log(
-      `Oracle timestamp source=${oracleTimestamp.source} latestPointSec=${oracleTimestamp.latestPointSec ?? "none"} usingCurrentSec=${oracleTimestamp.oracleTimestampSec}`,
-    );
-  }
-  const confidenceBp = 10_000;
-  const livePositionNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
-  const decision = computeHedgePolicy({
-    positionSide: position.positionSide,
-    averageFundingBp: funding.averageFundingBp,
-    borosImpliedAprBp: borosAprBp,
-    confidenceBp,
-    hasExistingHedge: Boolean(positionState?.[4]),
-    existingHedgeIsLong: Boolean(positionState?.[9]),
-    entryThresholdBp,
-    exitThresholdBp,
-    minConfidenceBp: MIN_CONFIDENCE_BP,
-    oiFeeBp: borosOiFeeBp,
-    mode: hedgeMode,
-  });
-  const predictedAprBp = Math.round(decision.carrySourceAprBp);
-  const contractBorosAprBp = Math.round(decision.carryCostAprBp);
-  const executionPlan = buildHedgeExecutionPlan({
-    decision,
-    proposedTargetHedgeNotionalWei: livePositionNotionalWei,
-    currentHedgeWei: positionState?.[8] ?? 0n,
-    hasExistingHedge: Boolean(positionState?.[4]),
-    currentHedgeIsLong: Boolean(positionState?.[9]),
-    rebalanceThresholdBp: DEFAULT_REBALANCE_THRESHOLD_BP,
-    minRebalanceDeltaWei: DEFAULT_MIN_REBALANCE_DELTA_WEI,
-  });
-  const shouldHedge = executionPlan.shouldHedge;
-  const targetHedgeIsLong = executionPlan.targetHedgeIsLong;
-  const targetHedgeNotionalWei = executionPlan.targetHedgeNotionalWei;
-  runtime.log(
-    `Decision summary mode=${hedgeMode} exposure=${decision.exposure} edgeBp=${decision.edgeBp} shouldHedge=${shouldHedge} targetHedgeIsLong=${targetHedgeIsLong} targetWei=${targetHedgeNotionalWei} action=${executionPlan.action}`,
-  );
-
-  runtime.log(
-    `Boros APR: ${(borosApr * 100).toFixed(2)}% marketId=${borosQuote.marketId} field=${borosQuote.field} midApr=${borosQuote.midApr ?? "null"} lastTradedApr=${borosQuote.lastTradedApr ?? "null"} floatingApr=${borosQuote.floatingApr ?? "null"} state=${borosQuote.state ?? "unknown"} market=${config.borosMarketAddress ?? "n/a"}`,
-  );
-  runtime.log(`HL 1h avg funding (annualized): ${funding.averageFundingBp} bp`);
-  runtime.log(
-    `HL wallet=${hlWallet.address} source=${hlWallet.source} side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ETH, mark=${position.markPrice.toFixed(4)}, ` +
-    `hedgeNotional=${position.hedgeNotional.toFixed(6)} useMark=${useMarkPrice} exposure=${decision.exposure} edge=${decision.edgeBp}bp targetHedgeIsLong=${targetHedgeIsLong}`,
-  );
-
-  const proofPayload = JSON.stringify({
-    type: "kYUteMvpNodeModeProof",
-    version: 2,
-    generatedAt: new Date().toISOString(),
-    chainId: 0,
-    userId: userId.toString(),
-    pair: PAIR,
-    vaultAddress,
-    yuToken,
-    inputs: {
-      windowHours,
-      thresholdBp: entryThresholdBp,
-      averageFundingBp: funding.averageFundingBp,
-      positionSide: position.positionSide,
-      hlSize: position.hlSize,
-      markPrice: position.markPrice,
-      hedgeNotional: position.hedgeNotional,
-      borosAprBp,
-      observedFundingPoints: funding.observedFundingPoints,
-    },
-    outputs: {
-      predictedAprBp,
-      confidenceBp,
-      shouldHedge,
-      targetHedgeIsLong,
-      exposure: decision.exposure,
-      edgeBp: decision.edgeBp,
-    },
-  });
-  const proofHash = keccak256(toBytes(proofPayload));
-
-  const reportBytes = encodeAbiParameters(
-    [
-      { type: "uint256" },
-      { type: "bool" },
-      { type: "address" },
-      { type: "int256" },
-      { type: "uint256" },
-      { type: "int256" },
-      { type: "uint8" },
-      { type: "uint256" },
-      { type: "uint256" },
-      { type: "bytes32" }
-    ],
-    [
-      userId,
-      shouldHedge,
-      yuToken,
-      BigInt(predictedAprBp),
-      BigInt(confidenceBp),
-      BigInt(contractBorosAprBp),
-      targetHedgeIsLong ? 1 : 2,
-      livePositionNotionalWei,
-      oracleTimestamp.oracleTimestampSec,
-      proofHash
-    ],
-  )
-
-  if (executeOnchain) {
-    let directExecuteSucceeded = false;
-
-    if (!executionPlan.executeNeeded) {
-      runtime.log(`No vault execution needed; action=${executionPlan.action}`);
-    } else if (agentSidecarUrl) {
-      try {
-        runtime.log(`Submitting execute via agent sidecar ${agentSidecarUrl}`);
-        const sidecarExecute = await http
-          .sendRequest(runtime, executeDecisionViaSidecar, consensusIdenticalAggregation())({
-            baseUrl: agentSidecarUrl,
-            payload: {
-              vaultAddress,
-              userId: userId.toString(),
-              walletAddress: hlWallet.address,
-              yuToken,
-              predictedAprBp: String(predictedAprBp),
-              confidenceBp: String(confidenceBp),
-              contractBorosAprBp: String(contractBorosAprBp),
-              targetHedgeNotionalWei: targetHedgeNotionalWei.toString(),
-              oracleTimestampSec: oracleTimestamp.oracleTimestampSec.toString(),
-              proofHash,
-              livePositionNotionalWei: livePositionNotionalWei.toString(),
-              positionSide: position.positionSide,
-              targetHedgeIsLong,
-              shouldHedge,
-              rpcUrl,
-            },
-          })
-          .result();
-        runtime.log(
-          `Agent sidecar execute completed syncTx=${sidecarExecute.syncTxHash ?? "none"} executeTx=${sidecarExecute.executeTxHash ?? "none"}`,
+      if (hasVaultAddress && mappedUser === ZERO_ADDRESS) {
+        throw new Error(
+          `Vault mapping missing; run syncUserAddress during enrollment. userId=${userId} wallet=${hlWallet.address} vault=${vaultAddress}`,
         );
-        directExecuteSucceeded = true;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        runtime.log(`Agent sidecar execute failed (${message})`);
       }
-    }
+      if (hasVaultAddress && mappedUser.toLowerCase() !== hlWallet.address.toLowerCase()) {
+        throw new Error(
+          `Vault mapping mismatch for userId=${userId}: onchain=${mappedUser} supabase=${hlWallet.address}`,
+        );
+      }
 
-    if (!directExecuteSucceeded && executionPlan.executeNeeded && directAccount && hasVaultAddress && !agentSidecarUrl) {
-      try {
-        runtime.log(`Submitting direct executeHedge to vault=${vaultAddress} via rpc=${rpcUrl}`);
-        runtime.log("Re-reading vault creCallbackOperator before execute via raw eth_call");
-        const { rawResult: executeOperatorRawResult, address: registeredOperator } =
-          await readCreCallbackOperator({
-            rpcUrl,
-            vaultAddress,
-            rpcFetch,
-          });
-        runtime.log(`Execute-path creCallbackOperator raw result=${executeOperatorRawResult}`);
-        runtime.log(`Execute-path decoded creCallbackOperator=${registeredOperator}`);
-        if (registeredOperator.toLowerCase() !== directAccount.address.toLowerCase()) {
-          throw new Error(
-            `Callback signer ${directAccount.address} does not match vault creCallbackOperator ${registeredOperator}`,
+      const oracleTimestamp = resolveFreshOracleTimestamp(funding.latestFundingTimestampMs);
+      if (borosQuote.apr === null) {
+        throw new Error(`Boros APR missing for marketId=${borosQuote.marketId} field=${borosQuote.field}`);
+      }
+      if (oracleTimestamp.source !== "latest_point") {
+        runtime.log(
+          `${prefix} Oracle timestamp source=${oracleTimestamp.source} latestPointSec=${oracleTimestamp.latestPointSec ?? "none"} usingCurrentSec=${oracleTimestamp.oracleTimestampSec}`,
+        );
+      }
+
+      const borosApr = borosQuote.apr;
+      const borosAprBp = Math.round(borosApr * 10_000);
+      const confidenceBp = 10_000;
+      const livePositionNotionalWei = parseEther(position.hedgeNotional.toFixed(18));
+      const decision = computeHedgePolicy({
+        positionSide: position.positionSide,
+        averageFundingBp: funding.averageFundingBp,
+        borosImpliedAprBp: borosAprBp,
+        confidenceBp,
+        hasExistingHedge: Boolean(positionState[4]),
+        existingHedgeIsLong: Boolean(positionState[9]),
+        entryThresholdBp,
+        exitThresholdBp,
+        minConfidenceBp: MIN_CONFIDENCE_BP,
+        oiFeeBp: borosOiFeeBp,
+        mode: hedgeMode,
+      });
+      const predictedAprBp = Math.round(decision.carrySourceAprBp);
+      const contractBorosAprBp = Math.round(decision.carryCostAprBp);
+      const executionPlan = buildHedgeExecutionPlan({
+        decision,
+        proposedTargetHedgeNotionalWei: livePositionNotionalWei,
+        currentHedgeWei: positionState[8],
+        hasExistingHedge: Boolean(positionState[4]),
+        currentHedgeIsLong: Boolean(positionState[9]),
+        rebalanceThresholdBp: DEFAULT_REBALANCE_THRESHOLD_BP,
+        minRebalanceDeltaWei: DEFAULT_MIN_REBALANCE_DELTA_WEI,
+      });
+      const shouldHedge = executionPlan.shouldHedge;
+      const targetHedgeIsLong = executionPlan.targetHedgeIsLong;
+      const targetHedgeNotionalWei = executionPlan.targetHedgeNotionalWei;
+
+      runtime.log(
+        `${prefix} Decision summary mode=${hedgeMode} exposure=${decision.exposure} edgeBp=${decision.edgeBp} shouldHedge=${shouldHedge} targetHedgeIsLong=${targetHedgeIsLong} targetWei=${targetHedgeNotionalWei} action=${executionPlan.action}`,
+      );
+      runtime.log(
+        `${prefix} Boros APR: ${(borosApr * 100).toFixed(2)}% marketId=${borosQuote.marketId} field=${borosQuote.field} midApr=${borosQuote.midApr ?? "null"} lastTradedApr=${borosQuote.lastTradedApr ?? "null"} floatingApr=${borosQuote.floatingApr ?? "null"} state=${borosQuote.state ?? "unknown"} market=${market.borosMarketAddress ?? "n/a"}`,
+      );
+      runtime.log(`${prefix} HL 1h avg funding (annualized): ${funding.averageFundingBp} bp`);
+      runtime.log(
+        `${prefix} HL wallet=${hlWallet.address} source=${hlWallet.source} side=${position.positionSide}, size=${position.hlSize.toFixed(6)} ${market.coin}, mark=${position.markPrice.toFixed(4)}, hedgeNotional=${position.hedgeNotional.toFixed(6)} useMark=${useMarkPrice} exposure=${decision.exposure} edge=${decision.edgeBp}bp targetHedgeIsLong=${targetHedgeIsLong}`,
+      );
+
+      const proofPayload = JSON.stringify({
+        type: "kYUteMvpNodeModeProof",
+        version: 3,
+        generatedAt: new Date().toISOString(),
+        chainId: 0,
+        userId: userId.toString(),
+        pair: market.pair,
+        vaultAddress,
+        yuToken: market.yuToken,
+        inputs: {
+          windowHours,
+          thresholdBp: entryThresholdBp,
+          averageFundingBp: funding.averageFundingBp,
+          positionSide: position.positionSide,
+          hlSize: position.hlSize,
+          markPrice: position.markPrice,
+          hedgeNotional: position.hedgeNotional,
+          borosAprBp,
+          observedFundingPoints: funding.observedFundingPoints,
+        },
+        outputs: {
+          predictedAprBp,
+          confidenceBp,
+          shouldHedge,
+          targetHedgeIsLong,
+          exposure: decision.exposure,
+          edgeBp: decision.edgeBp,
+        },
+      });
+      const proofHash = keccak256(toBytes(proofPayload));
+
+      let marketExecuted = false;
+      if (executeOnchain) {
+        if (!executionPlan.executeNeeded) {
+          runtime.log(`${prefix} No vault execution needed; action=${executionPlan.action}`);
+        } else {
+          runtime.log(`${prefix} Submitting execute via agent sidecar ${agentSidecarUrl}`);
+          const sidecarExecute = await http
+            .sendRequest(runtime, executeDecisionViaSidecar, consensusIdenticalAggregation())({
+              baseUrl: agentSidecarUrl,
+              payload: {
+                vaultAddress,
+                userId: userId.toString(),
+                walletAddress: hlWallet.address,
+                yuToken: market.yuToken,
+                predictedAprBp: String(predictedAprBp),
+                confidenceBp: String(confidenceBp),
+                contractBorosAprBp: String(contractBorosAprBp),
+                targetHedgeNotionalWei: targetHedgeNotionalWei.toString(),
+                oracleTimestampSec: oracleTimestamp.oracleTimestampSec.toString(),
+                proofHash,
+                livePositionNotionalWei: livePositionNotionalWei.toString(),
+                positionSide: position.positionSide,
+                targetHedgeIsLong,
+                shouldHedge,
+                rpcUrl,
+              },
+            })
+            .result();
+          runtime.log(
+            `${prefix} Agent sidecar execute completed syncTx=${sidecarExecute.syncTxHash ?? "none"} executeTx=${sidecarExecute.executeTxHash ?? "none"}`,
           );
+          marketExecuted = true;
         }
-        if (!hasMappedUser || positionState == null) {
-          throw new Error(`userId=${userId} is not mapped in vault ${vaultAddress}`);
-        }
-
-        const leverageForSync = positionState[3] > 0n ? positionState[3] : 1n;
-        const syncNeeded =
-          (positionState[0] === "0x0000000000000000000000000000000000000000" && livePositionNotionalWei > 0n) ||
-          (
-            positionState[0] !== "0x0000000000000000000000000000000000000000" &&
-            (
-              Boolean(positionState[1]) !== (position.positionSide === "long") ||
-              positionState[2] !== livePositionNotionalWei ||
-              positionState[7] !== targetHedgeNotionalWei ||
-              Boolean(positionState[10]) !== targetHedgeIsLong
-            )
-          );
-        if (syncNeeded) {
-          const syncData = encodeFunctionData({
-            abi: KYUTE_VAULT_ABI,
-            functionName: "syncHyperliquidPosition",
-            args: [
-              userId,
-              position.positionSide === "long",
-              livePositionNotionalWei,
-              leverageForSync,
-              targetHedgeNotionalWei,
-              targetHedgeIsLong,
-              oracleTimestamp.oracleTimestampSec,
-            ],
-          });
-          const syncTxHash = await sendSignedTransaction({
-            rpcUrl,
-            account: directAccount,
-            to: vaultAddress,
-            data: syncData,
-            rpcFetch,
-          });
-          const syncReceipt = await waitForTransactionReceipt({
-            rpcUrl,
-            txHash: syncTxHash,
-            rpcFetch,
-          });
-          if (syncReceipt.status !== "success") {
-            throw new Error(`syncHyperliquidPosition failed tx=${syncTxHash}`);
-          }
-          runtime.log(`Direct syncHyperliquidPosition tx confirmed: ${syncTxHash}`);
-        }
-
-        const data = encodeFunctionData({
-          abi: KYUTE_VAULT_ABI,
-          functionName: "executeHedge",
-          args: [
-            userId,
-            shouldHedge,
-            yuToken,
-            BigInt(predictedAprBp),
-            BigInt(confidenceBp),
-            BigInt(contractBorosAprBp),
-            targetHedgeNotionalWei,
-            oracleTimestamp.oracleTimestampSec,
-            proofHash,
-          ],
-        });
-
-        const txHash = await sendSignedTransaction({
-          rpcUrl,
-          account: directAccount,
-          to: vaultAddress,
-          data,
-          rpcFetch,
-        });
-        runtime.log(`Direct executeHedge tx submitted: ${txHash}`);
-        directExecuteSucceeded = true;
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        runtime.log(`Direct executeHedge failed (${message})`);
+      } else {
+        runtime.log(`${prefix} Onchain execution disabled; decision only.`);
       }
+
+      const outcome = resolveMarketExecutionOutcome({
+        shouldHedge,
+        action: executionPlan.action,
+        executed: marketExecuted,
+        executeOnchain,
+      });
+      if (executionPlan.executeNeeded && executeOnchain && !marketExecuted) {
+        throw new Error(`${prefix} execution required but did not complete`);
+      }
+      runtime.log(`${prefix} Hedge Execution Outcome: ${outcome}`);
+      marketOutcomes.push(`${market.coin}:${outcome}`);
     }
 
-    if (!enableReportWrite) {
-      if (agentSidecarUrl) {
-        runtime.log("CRE report write disabled in demo mode; sidecar execute path only.");
-      } else {
-        runtime.log("CRE report write disabled in demo mode; direct execute path only.");
-      }
-    } else {
-      if (!directExecuteSucceeded) {
-        runtime.log("Direct execute failed; attempting CRE report write fallback.");
-      } else {
-        runtime.log("Direct execute succeeded; also emitting CRE report because enableReportWrite=true.");
-      }
-
-      const signedReport = runtime.report({
-        encodedPayload: hexToBase64(reportBytes),
-        encoderName: "evm",
-        signingAlgo: "ecdsa",
-        hashingAlgo: "keccak256",
-      }).result();
-
-      const evmClient = new EVMClient(4949039107694359620n);
-      const receiver = new Uint8Array(Buffer.from(vaultAddress.slice(2), "hex"));
-
-      if (hasVaultAddress) {
-        evmClient.writeReport(runtime, {
-          $report: true,
-          receiver,
-          report: signedReport,
-        }).result();
-      }
-    }
-  } else {
-    runtime.log(`Onchain execution disabled; report payload bytes=${reportBytes.length}`);
-  }
-
-  runtime.log(`Hedge Decision Computed: ${shouldHedge}`);
-  return shouldHedge ? "HEDGED_APPLIED_TO_VAULT" : "HEDGE_SKIPPED";
+    return marketOutcomes.join(";");
   } catch (error) {
     const message = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
     runtime.log(`kyute-agent failure: ${message}`);
