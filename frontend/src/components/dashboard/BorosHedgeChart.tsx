@@ -11,6 +11,7 @@ type HedgePoint = {
 
 interface BorosHedgeChartProps {
   points: HedgePoint[];
+  assetLabel?: string;
   currentAmountYu?: number | null;
   hedgeSide?: string | null;
   lastUpdatedAt?: string | null;
@@ -29,6 +30,7 @@ const formatTs = (ts: number) =>
 
 export function BorosHedgeChart({
   points,
+  assetLabel = "ETH",
   currentAmountYu = null,
   hedgeSide = null,
   lastUpdatedAt = null,
@@ -45,8 +47,8 @@ export function BorosHedgeChart({
     <div className={cn("w-full min-w-0 min-h-[360px] overflow-hidden border border-[#1a1a1a] bg-[linear-gradient(180deg,#0a0a0a,#080808)] rounded-sm p-4", className)}>
       <div className="flex items-center justify-between mb-3 shrink-0">
         <div>
-          <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">BOROS HEDGE (YU)</h3>
-          <p className="text-sm font-semibold text-white mt-1">Vault Position (YU)</p>
+          <h3 className="text-xs font-mono tracking-widest uppercase text-[#666]">BOROS HEDGE (YU-{assetLabel})</h3>
+          <p className="text-sm font-semibold text-white mt-1">Vault Position (YU-{assetLabel})</p>
         </div>
         <div className="text-right">
           <p className="text-xs font-mono text-white">

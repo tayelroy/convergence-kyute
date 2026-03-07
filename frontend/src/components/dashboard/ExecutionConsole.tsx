@@ -48,13 +48,15 @@ export function ExecutionConsole({
             action: `AI ${item.action ?? "DECISION"}`,
             amountEth: null as number | null,
             txHash: extractTxHash(item.reason),
+            detail: item.reason ?? null,
         }));
 
         const hedgeEntries = hedges.map((item) => ({
             timestamp: item.timestamp,
             action: `BOROS ${String(item.status ?? "UNKNOWN").toUpperCase()}`,
             amountEth: Number(item.amount_eth ?? 0),
-            txHash: extractTxHash(item.market_address, item.status),
+            txHash: extractTxHash(item.reason, item.market_address, item.status),
+            detail: item.reason ?? null,
         }));
 
         const automationEntries = chainlinkAutomation.map((item) => ({
@@ -62,6 +64,7 @@ export function ExecutionConsole({
             action: `AUTOMATION ${item.action ?? "EXECUTE"}`,
             amountEth: null as number | null,
             txHash: extractTxHash(item.status, item.reason),
+            detail: item.reason ?? null,
         }));
 
         const functionsEntries = chainlinkFunctions.map((item) => ({
@@ -69,6 +72,7 @@ export function ExecutionConsole({
             action: `FUNCTIONS ${item.action ?? "REQUEST"}`,
             amountEth: null as number | null,
             txHash: extractTxHash(item.reason, item.status),
+            detail: item.reason ?? null,
         }));
 
         const feedEntries = chainlinkFeed.map((item) => ({
@@ -76,6 +80,7 @@ export function ExecutionConsole({
             action: "FEED UPDATE",
             amountEth: Number(item.amount_eth ?? 0),
             txHash: extractTxHash(item.reason, item.status),
+            detail: item.reason ?? null,
         }));
 
         const ccipEntries = chainlinkCcip.map((item) => ({
@@ -83,6 +88,7 @@ export function ExecutionConsole({
             action: `CCIP ${item.action ?? "SYNC"}`,
             amountEth: Number(item.amount_eth ?? 0),
             txHash: extractTxHash(item.status, item.reason, item.market_address),
+            detail: item.reason ?? null,
         }));
 
         return [...aiEntries, ...hedgeEntries, ...automationEntries, ...functionsEntries, ...feedEntries, ...ccipEntries]
@@ -120,6 +126,9 @@ export function ExecutionConsole({
                                 <span className="text-[#666] truncate max-w-[280px]">tx={log.txHash}</span>
                             )}
                         </div>
+                        {log.detail ? (
+                            <div className="mt-1 text-[10px] text-[#8ba58f] break-words">{log.detail}</div>
+                        ) : null}
                     </div>
                 ))}
             </div>
