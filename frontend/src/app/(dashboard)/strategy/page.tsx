@@ -65,12 +65,19 @@ export default function StrategyPage() {
   const [generationError, setGenerationError] = useState<string | null>(null);
   const [isGenerating, setIsGenerating] = useState(false);
   const [isAiLabExpanded, setIsAiLabExpanded] = useState(false);
+  const [applyFeedback, setApplyFeedback] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [remoteLoaded, setRemoteLoaded] = useState(false);
 
   useEffect(() => {
     window.localStorage.setItem(STRATEGY_STORAGE_KEY, JSON.stringify(preferences));
   }, [preferences]);
+
+  useEffect(() => {
+    if (!applyFeedback) return;
+    const timeout = window.setTimeout(() => setApplyFeedback(null), 2500);
+    return () => window.clearTimeout(timeout);
+  }, [applyFeedback]);
 
   useEffect(() => {
     let cancelled = false;
@@ -194,6 +201,7 @@ export default function StrategyPage() {
   const generateStrategy = async () => {
     setIsGenerating(true);
     setGenerationError(null);
+    setApplyFeedback(null);
     try {
       const response = await fetch("/api/strategy-generate", {
         method: "POST",
@@ -224,6 +232,7 @@ export default function StrategyPage() {
   const applyPlanToForm = () => {
     if (!generatedPlan) return;
     setPreferences((current) => applyAiStrategyPatch(current, generatedPlan.marketPatch));
+    setApplyFeedback(`Applied ${generatedPlan.title} to the form. Review the ETH and BTC rows below before the next run.`);
   };
 
   return (
@@ -479,9 +488,14 @@ export default function StrategyPage() {
                             onClick={applyPlanToForm}
                             className="h-10 rounded-full border border-emerald-400/25 bg-emerald-400/12 px-4 text-[11px] font-mono uppercase tracking-[0.18em] text-emerald-100 hover:bg-emerald-400/18"
                           >
-                            Apply patch to form
+                            {applyFeedback ? "Patch applied" : "Apply patch to form"}
                           </Button>
                         </div>
+                        {applyFeedback ? (
+                          <div className="rounded-2xl border border-emerald-400/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
+                            {applyFeedback}
+                          </div>
+                        ) : null}
                       </div>
                     ) : (
                       <pre className="mt-3 max-h-[280px] overflow-auto whitespace-pre-wrap rounded-2xl bg-black/25 p-4 text-xs leading-6 text-neutral-300">
