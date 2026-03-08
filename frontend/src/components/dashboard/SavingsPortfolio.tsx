@@ -32,29 +32,23 @@ export function SavingsPortfolio({
             </div>
 
             <div className="flex-1 min-h-0 overflow-y-auto no-scrollbar">
-                <table className="w-full text-left border-collapse">
+                <table className="w-full table-fixed text-left border-collapse">
                     <thead className="sticky top-0 bg-[#0a0a0a]">
                         <tr className="border-b border-[#1a1a1a] text-[#444] text-xs font-mono uppercase">
-                            <th className="py-2 pl-2">Asset</th>
-                            <th className="py-2">Balance</th>
-                            <th className="py-2 text-right pr-2">Source</th>
+                            <th className="w-[40%] py-2 pl-2">Asset</th>
+                            <th className="w-[60%] py-2">Balance</th>
                         </tr>
                     </thead>
                     <tbody>
                         {hasLiveBalance && (
                             <tr className="border-b border-[#111]">
-                                <td className="py-2 pl-2 font-mono text-sm text-white">{liveVaultAssetLabel}</td>
-                                <td className="py-2 font-mono text-sm text-[#888]">{resolvedBalance.toFixed(4)} {liveVaultAssetLabel}</td>
-                                <td className="py-2 pr-2 text-right">
-                                    <span className="rounded-sm border border-[#19322c] bg-[#08120f] px-2 py-1 text-[10px] uppercase tracking-wider text-[#7dd3a3]">
-                                        Live Vault
-                                    </span>
-                                </td>
+                                <td className="align-middle py-2 pl-2 font-mono text-sm text-white whitespace-nowrap">{liveVaultAssetLabel}</td>
+                                <td className="align-middle py-2 font-mono text-sm text-[#888] whitespace-nowrap">{resolvedBalance.toFixed(4)} {liveVaultAssetLabel}</td>
                             </tr>
                         )}
                         {!loading && !hasLiveBalance && (
                             <tr>
-                                <td colSpan={3} className="py-6 text-center text-xs text-[#666] font-mono">
+                                <td colSpan={2} className="py-6 text-center text-xs text-[#666] font-mono">
                                     No live vault balance reported yet.
                                 </td>
                             </tr>

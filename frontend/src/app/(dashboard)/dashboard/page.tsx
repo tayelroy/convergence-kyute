@@ -344,9 +344,9 @@ export default function DashboardPage() {
               </div>
 
               <div className="grid grid-cols-1 gap-3 lg:grid-cols-12">
-                <div className="min-h-0 rounded-sm border border-[#1a1a1a] bg-[radial-gradient(circle_at_top,#11151c,#07090c_70%)] p-4 lg:col-span-12">
-                  <div className="flex flex-col gap-4 lg:flex-row lg:items-stretch">
-                    <div className="flex-1 rounded-sm border border-[#1d2733] bg-[linear-gradient(145deg,#0c0f14,#0a0b10)] px-4 py-4">
+                <div className="min-h-0 rounded-sm border border-[#1a1a1a] bg-[radial-gradient(circle_at_top,#11151c,#07090c_70%)] p-4 lg:col-span-12 lg:h-[340px]">
+                  <div className="flex h-full flex-col gap-4 lg:flex-row lg:items-stretch">
+                    <div className="no-scrollbar min-h-0 flex-1 rounded-sm border border-[#1d2733] bg-[linear-gradient(145deg,#0c0f14,#0a0b10)] px-4 py-4 lg:overflow-y-auto">
                       <div className="flex items-center justify-between">
                         <div>
                           <p className="text-[10px] font-mono uppercase tracking-[0.4em] text-[#5b6472]">Yield Alert</p>
@@ -388,7 +388,7 @@ export default function DashboardPage() {
                       )}
                     </div>
 
-                    <div className="grid w-full gap-3 lg:w-[220px]">
+                    <div className="grid w-full gap-3 lg:h-full lg:w-[220px] lg:grid-rows-2">
                       <div className="rounded-sm border border-[#19322c] bg-[linear-gradient(180deg,#0b1412,#07100d)] px-3 py-3 text-right">
                         <p className="text-[10px] font-mono uppercase tracking-[0.3em] text-[#4c7564]">Boros Apr</p>
                         <p className="mt-2 text-3xl font-mono leading-none text-emerald-400">{market.borosAprDisplay}</p>
