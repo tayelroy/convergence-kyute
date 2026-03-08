@@ -11,8 +11,9 @@ export const hyperliquidEvmTestnet = defineChain({
 export const HYPERLIQUID_TESTNET_CHAIN_ID = 998;
 
 const KYUTE_VAULT_CHAIN_ID = Number(process.env.NEXT_PUBLIC_KYUTE_CHAIN_ID ?? "31337");
+const normalizeLocalRpcUrl = (value: string) => value.replace("http://localhost:", "http://127.0.0.1:");
 const KYUTE_VAULT_RPC_URL =
-  String(process.env.NEXT_PUBLIC_KYUTE_RPC_URL ?? "").trim() || "http://127.0.0.1:8545";
+  normalizeLocalRpcUrl(String(process.env.NEXT_PUBLIC_KYUTE_RPC_URL ?? "").trim() || "http://127.0.0.1:8545");
 
 export const kyuteVaultChain =
   KYUTE_VAULT_CHAIN_ID === HYPERLIQUID_TESTNET_CHAIN_ID

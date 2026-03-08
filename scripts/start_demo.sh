@@ -116,7 +116,7 @@ echo "   ✓ Required deployment env vars found."
 echo ""
 
 FORK_URL="${FORK_URL:-${RPC_URL:-${DEFAULT_FORK_URL}}}"
-DEMO_RPC_URL="${DEMO_RPC_URL:-http://localhost:8545}"
+DEMO_RPC_URL="${DEMO_RPC_URL:-http://127.0.0.1:8545}"
 FORK_BLOCK_NUMBER="${FORK_BLOCK_NUMBER:-}"
 DEMO_NO_FORK="${DEMO_NO_FORK:-true}"
 DEMO_USER_ID="${DEMO_USER_ID:-${DEMO_USER_ID_DEFAULT}}"
@@ -308,6 +308,10 @@ resolve_supabase_demo_identity() {
         "${query_url}" 2>/tmp/kyute_enroll_supabase.err); then
         echo "   • Failed to query Supabase for canonical wallet ${canonical_wallet}."
         tail -n 5 /tmp/kyute_enroll_supabase.err 2>/dev/null || true
+        if grep -qi "Could not resolve host" /tmp/kyute_enroll_supabase.err 2>/dev/null; then
+            echo "   • Supabase DNS/network is unavailable; CRE enrollment requires live identity lookup."
+            echo "   • For local-only runs, retry with DEMO_EXEC_MODE=direct."
+        fi
         return 1
     fi
 
@@ -490,6 +494,9 @@ export KYUTE_VAULT_ADDRESS="${VAULT_ADDRESS}"
 export BOROS_YU_TOKEN="${DEFAULT_YU_TOKEN}"
 export DEMO_USER_ID
 upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_KYUTE_VAULT_ADDRESS" "${VAULT_ADDRESS}"
+if [ -n "${BOROS_COLLATERAL_ADDRESS:-}" ]; then
+    upsert_env_var "${FRONTEND_ENV_LOCAL}" "NEXT_PUBLIC_BOROS_COLLATERAL_ADDRESS" "${BOROS_COLLATERAL_ADDRESS}"
+fi
 if [ -n "${DEMO_SHOULD_HEDGE:-}" ]; then
     export DEMO_SHOULD_HEDGE
 fi

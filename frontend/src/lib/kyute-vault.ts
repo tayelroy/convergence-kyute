@@ -138,6 +138,12 @@ export const getKyuteVaultAddress = (): Address | undefined => {
   return raw as Address;
 };
 
+export const getKyuteCollateralAddress = (): Address | undefined => {
+  const raw = String(process.env.NEXT_PUBLIC_BOROS_COLLATERAL_ADDRESS ?? "").trim();
+  if (!isAddress(raw)) return undefined;
+  return raw as Address;
+};
+
 export const formatAddress = (value?: string | null, chars = 4) => {
   if (!value) return "--";
   if (value.length < chars * 2 + 2) return value;

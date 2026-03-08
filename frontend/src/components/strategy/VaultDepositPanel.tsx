@@ -11,10 +11,10 @@ import {
   useReadContract,
   useSwitchActiveWalletChain,
 } from "thirdweb/react";
-import { formatUnits, parseUnits } from "viem";
+import { formatUnits, isAddress, parseUnits } from "viem";
 import { kyuteVaultChain, kyuteVaultChainLabel } from "@/lib/chains";
 import { client, hasThirdwebClient } from "@/lib/thirdweb";
-import { ERC20_ABI, formatAddress, getKyuteVaultAddress, VAULT_ABI } from "@/lib/kyute-vault";
+import { ERC20_ABI, formatAddress, getKyuteCollateralAddress, getKyuteVaultAddress, VAULT_ABI } from "@/lib/kyute-vault";
 import { cn } from "@/lib/utils";
 
 const UNRESOLVED_ADDRESS = "0x0000000000000000000000000000000000000001" as const;
@@ -68,57 +68,74 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
   const [amount, setAmount] = useState("");
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [isSwitching, setIsSwitching] = useState(false);
+  const [pendingChainSwitch, setPendingChainSwitch] = useState(false);
+  const [nonceRefreshVersion, setNonceRefreshVersion] = useState(0);
+  const [chainNonce, setChainNonce] = useState<number | null>(null);
+  const [isNoncePending, setIsNoncePending] = useState(false);
+  const [nonceError, setNonceError] = useState<string | null>(null);
+  const configuredCollateralAddress = getKyuteCollateralAddress();
+  const walletOnVaultChain = activeChain?.id === kyuteVaultChain.id;
+  const readChain = walletOnVaultChain && activeChain ? activeChain : kyuteVaultChain;
 
   const vaultContract = useMemo(
     () =>
       getContract({
         client: client!,
         address: vaultAddress,
-        chain: kyuteVaultChain,
+        chain: readChain,
         abi: VAULT_ABI,
       }),
-    [vaultAddress],
+    [readChain, vaultAddress],
   );
 
-  const { data: assetAddress } = useReadContract({
+  const {
+    data: assetAddress,
+    isPending: isAssetReadPending,
+    error: assetReadError,
+  } = useReadContract({
     contract: vaultContract!,
     method: "asset",
     params: [],
     queryOptions: { enabled: Boolean(vaultContract) },
   });
 
+  const resolvedAssetAddress =
+    typeof assetAddress === "string" && isAddress(assetAddress)
+      ? (assetAddress as `0x${string}`)
+      : configuredCollateralAddress;
+
   const assetContract = useMemo(() => {
     return getContract({
       client: client!,
-      address: typeof assetAddress === "string" ? assetAddress : UNRESOLVED_ADDRESS,
-      chain: kyuteVaultChain,
+      address: resolvedAssetAddress ?? UNRESOLVED_ADDRESS,
+      chain: readChain,
       abi: ERC20_ABI,
     });
-  }, [assetAddress]);
+  }, [readChain, resolvedAssetAddress]);
 
   const { data: symbolData } = useReadContract({
     contract: assetContract!,
     method: "symbol",
     params: [],
-    queryOptions: { enabled: typeof assetAddress === "string" },
+    queryOptions: { enabled: Boolean(resolvedAssetAddress) },
   });
   const { data: decimalsData } = useReadContract({
     contract: assetContract,
     method: "decimals",
     params: [],
-    queryOptions: { enabled: typeof assetAddress === "string" },
+    queryOptions: { enabled: Boolean(resolvedAssetAddress) },
   });
   const { data: balanceData } = useReadContract({
     contract: assetContract,
     method: "balanceOf",
     params: [account?.address ?? "0x0000000000000000000000000000000000000000"],
-    queryOptions: { enabled: typeof assetAddress === "string" && Boolean(account?.address) },
+    queryOptions: { enabled: Boolean(resolvedAssetAddress) && Boolean(account?.address) },
   });
   const { data: allowanceData } = useReadContract({
     contract: assetContract,
     method: "allowance",
     params: [account?.address ?? "0x0000000000000000000000000000000000000000", vaultAddress],
-    queryOptions: { enabled: typeof assetAddress === "string" && Boolean(account?.address) },
+    queryOptions: { enabled: Boolean(resolvedAssetAddress) && Boolean(account?.address) },
   });
   const { data: sharesData } = useReadContract({
     contract: vaultContract!,
@@ -147,15 +164,16 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
   const needsApproval = amountWei !== null && allowance !== undefined ? allowance < amountWei : false;
   const insufficientBalance = amountWei !== null && balance !== undefined ? balance < amountWei : false;
   const invalidAmount = amount.trim().length > 0 && amountWei === null;
+  const hasAmount = amountWei !== null;
 
   const refreshContracts = useCallback(() => {
     if (vaultAddress) {
       invalidateContractQuery({ chainId: kyuteVaultChain.id, contractAddress: vaultAddress });
     }
-    if (typeof assetAddress === "string") {
-      invalidateContractQuery({ chainId: kyuteVaultChain.id, contractAddress: assetAddress });
+    if (resolvedAssetAddress) {
+      invalidateContractQuery({ chainId: kyuteVaultChain.id, contractAddress: resolvedAssetAddress });
     }
-  }, [assetAddress, invalidateContractQuery, vaultAddress]);
+  }, [invalidateContractQuery, resolvedAssetAddress, vaultAddress]);
 
   useEffect(() => {
     const onRefresh = () => {
@@ -174,16 +192,101 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
   const sharesLabel = formatTokenAmount(sharesData as bigint | undefined, decimals, "--");
   const isCorrectChain = activeChain?.id === kyuteVaultChain.id;
   const needsChainSwitch = Boolean(account) && !isCorrectChain;
+  const needsNonceResolution = Boolean(account) && isCorrectChain;
+  const nonceUnavailable = needsNonceResolution && (isNoncePending || chainNonce === null);
+  const approveDisabled =
+    !account || !isCorrectChain || !hasAmount || invalidAmount || insufficientBalance || !needsApproval || nonceUnavailable;
+  const depositDisabled =
+    !account || !isCorrectChain || !hasAmount || invalidAmount || insufficientBalance || needsApproval || nonceUnavailable;
+  const isResolvingAsset = isAssetReadPending && !resolvedAssetAddress;
+  const assetReadErrorMessage =
+    assetReadError instanceof Error
+      ? assetReadError.message
+      : assetReadError
+        ? String(assetReadError)
+        : null;
+  const disabledActionReason =
+    !account
+      ? "Connect a wallet to approve and deposit."
+      : needsChainSwitch
+        ? `Switch to ${kyuteVaultChainLabel} before approving or depositing.`
+        : isNoncePending
+          ? "Resolving current on-chain nonce..."
+          : nonceError
+            ? `Unable to read on-chain nonce: ${nonceError}`
+        : !hasAmount
+          ? "Enter a deposit amount first."
+          : invalidAmount
+            ? "Enter a valid positive deposit amount."
+            : insufficientBalance
+              ? "Wallet balance is below the requested deposit."
+              : needsApproval
+                ? `Approve ${symbol} before depositing.`
+                : null;
+
+  useEffect(() => {
+    if (!pendingChainSwitch) return;
+    if (activeChain?.id !== kyuteVaultChain.id) return;
+    refreshContracts();
+    setNonceRefreshVersion((version) => version + 1);
+    setStatusMessage(`Wallet switched to ${kyuteVaultChainLabel}.`);
+    setPendingChainSwitch(false);
+    setIsSwitching(false);
+  }, [activeChain?.id, pendingChainSwitch, refreshContracts]);
+
+  useEffect(() => {
+    if (!needsChainSwitch) return;
+    if (statusMessage === `Wallet switched to ${kyuteVaultChainLabel}.`) {
+      setStatusMessage(null);
+    }
+  }, [needsChainSwitch, statusMessage]);
+
+  useEffect(() => {
+    if (!account?.address || !isCorrectChain) {
+      setChainNonce(null);
+      setNonceError(null);
+      setIsNoncePending(false);
+      return;
+    }
+
+    const controller = new AbortController();
+    setIsNoncePending(true);
+    setNonceError(null);
+
+    void fetch(`/api/wallet-nonce?walletAddress=${account.address}`, {
+      cache: "no-store",
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        const body = (await response.json()) as { ok?: boolean; nonce?: number; error?: string };
+        if (!response.ok || !body.ok || !Number.isFinite(body.nonce)) {
+          throw new Error(body.error ?? `wallet-nonce failed (${response.status})`);
+        }
+        setChainNonce(Number(body.nonce));
+      })
+      .catch((error: unknown) => {
+        if (controller.signal.aborted) return;
+        setChainNonce(null);
+        setNonceError(error instanceof Error ? error.message : "Unknown nonce error");
+      })
+      .finally(() => {
+        if (controller.signal.aborted) return;
+        setIsNoncePending(false);
+      });
+
+    return () => controller.abort();
+  }, [account?.address, isCorrectChain, nonceRefreshVersion]);
 
   const onSwitchChain = async () => {
     try {
       setIsSwitching(true);
+      setPendingChainSwitch(true);
+      setStatusMessage(null);
       await switchActiveWalletChain(kyuteVaultChain);
-      setStatusMessage(`Wallet switched to ${kyuteVaultChainLabel}.`);
     } catch (error) {
-      setStatusMessage(error instanceof Error ? error.message : `Failed to switch to ${kyuteVaultChainLabel}.`);
-    } finally {
+      setPendingChainSwitch(false);
       setIsSwitching(false);
+      setStatusMessage(error instanceof Error ? error.message : `Failed to switch to ${kyuteVaultChainLabel}.`);
     }
   };
 
@@ -262,7 +365,11 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
             </button>
           ) : null}
 
-          {typeof assetAddress === "string" ? (
+          {isResolvingAsset ? (
+            <div className="rounded-2xl border border-neutral-400/15 bg-neutral-400/8 px-4 py-3 text-sm text-neutral-200/80">
+              Resolving vault asset on {kyuteVaultChainLabel}...
+            </div>
+          ) : !needsChainSwitch && resolvedAssetAddress ? (
             <>
               <TransactionButton
                 transaction={() =>
@@ -270,11 +377,13 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
                     contract: assetContract,
                     method: "approve",
                     params: [vaultAddress, amountWei ?? BigInt(0)],
+                    nonce: chainNonce ?? undefined,
                   })
                 }
-                disabled={!account || !isCorrectChain || !amountWei || invalidAmount || insufficientBalance || !needsApproval}
+                disabled={approveDisabled}
                 onTransactionConfirmed={() => {
                   refreshContracts();
+                  setNonceRefreshVersion((version) => version + 1);
                   setStatusMessage(`Collateral approved for ${formatAddress(vaultAddress, 5)}.`);
                 }}
                 onError={(error) => {
@@ -283,9 +392,11 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
                 unstyled
                 className={cn(
                   actionButtonClassName,
-                  needsApproval
-                    ? "border-cyan-400/30 bg-cyan-400/12 text-cyan-200 hover:bg-cyan-400/18"
-                    : "border-white/8 bg-white/[0.04] text-neutral-500",
+                  approveDisabled
+                    ? "cursor-not-allowed border-white/8 bg-white/[0.04] text-neutral-500 opacity-60"
+                    : needsApproval
+                      ? "border-cyan-400/30 bg-cyan-400/12 text-cyan-200 hover:bg-cyan-400/18"
+                      : "border-white/8 bg-white/[0.04] text-neutral-500",
                 )}
               >
                 {needsApproval ? `Approve ${symbol}` : "Allowance ready"}
@@ -297,11 +408,13 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
                     contract: vaultContract,
                     method: "deposit",
                     params: [amountWei ?? BigInt(0), account?.address ?? "0x0000000000000000000000000000000000000000"],
+                    nonce: chainNonce ?? undefined,
                   })
                 }
-                disabled={!account || !isCorrectChain || !amountWei || invalidAmount || insufficientBalance || needsApproval}
+                disabled={depositDisabled}
                 onTransactionConfirmed={() => {
                   refreshContracts();
+                  setNonceRefreshVersion((version) => version + 1);
                   setStatusMessage(`Deposited ${amount.trim()} ${symbol} into the vault.`);
                   setAmount("");
                 }}
@@ -311,15 +424,18 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
                 unstyled
                 className={cn(
                   actionButtonClassName,
-                  "border-emerald-400/30 bg-emerald-400/14 text-emerald-100 hover:bg-emerald-400/20",
+                  depositDisabled
+                    ? "cursor-not-allowed border-white/8 bg-white/[0.04] text-neutral-500 opacity-60"
+                    : "border-emerald-400/30 bg-emerald-400/14 text-emerald-100 hover:bg-emerald-400/20",
                 )}
               >
                 Deposit into vault
               </TransactionButton>
             </>
-          ) : (
+          ) : needsChainSwitch ? null : (
             <div className="rounded-2xl border border-yellow-400/15 bg-yellow-400/8 px-4 py-3 text-sm text-yellow-100/80">
               The vault asset could not be resolved yet. Make sure the configured vault is reachable on {kyuteVaultChainLabel}.
+              {assetReadErrorMessage ? ` (${assetReadErrorMessage})` : ""}
             </div>
           )}
         </div>
@@ -333,6 +449,7 @@ function ConfiguredVaultDepositPanel({ vaultAddress }: { vaultAddress: `0x${stri
               Wallet is on chain {activeChain?.id ?? "unknown"}. Switch to {kyuteVaultChainLabel} before approve and deposit.
             </p>
           ) : null}
+          {!needsChainSwitch && disabledActionReason ? <p className="text-amber-200/90">{disabledActionReason}</p> : null}
           {statusMessage ? <p className="text-emerald-200/90">{statusMessage}</p> : null}
           <p className="text-neutral-500">
             In demo mode the vault runs on local Anvil. Your wallet must be switched to the vault chain before approve and deposit can succeed.
