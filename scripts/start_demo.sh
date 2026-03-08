@@ -180,8 +180,16 @@ forge_broadcast_cmd() {
     local script_target="$1"
     local log_file="$2"
     cd "${CONTRACTS_DIR}"
+    # Ensure Foundry never falls back to keystore-based signing during demo runs.
+    unset ETH_KEYSTORE_ACCOUNT
+    unset ETH_KEYSTORE_PASSWORD
+    unset FOUNDRY_ETH_KEYSTORE_PASSWORD
     if [ -n "${ANVIL_PRIVATE_KEY:-}" ]; then
-        forge script "${script_target}" --rpc-url "${DEMO_RPC_URL}" --private-key "${ANVIL_PRIVATE_KEY}" --broadcast --skip-simulation > "${log_file}" 2>&1
+        local sender_arg=()
+        if command -v cast >/dev/null 2>&1; then
+            sender_arg=(--sender "$(cast wallet address --private-key "${ANVIL_PRIVATE_KEY}" 2>/dev/null || true)")
+        fi
+        forge script "${script_target}" --rpc-url "${DEMO_RPC_URL}" --private-key "${ANVIL_PRIVATE_KEY}" "${sender_arg[@]}" --broadcast --skip-simulation > "${log_file}" 2>&1
     else
         forge script "${script_target}" --rpc-url "${DEMO_RPC_URL}" --unlocked --sender "${ANVIL_DEPLOYER}" --broadcast --skip-simulation > "${log_file}" 2>&1
     fi
@@ -566,20 +574,112 @@ run_cre_cycle() {
     cre workflow simulate ./kyute-agent --target=staging-settings 2>&1 \
         | tee -a "${CRE_LOG_PATH}" \
         | awk '
+            function join_from(start,   i, s) {
+                s = ""
+                for (i = start; i <= NF; i++) {
+                    if (i > start) s = s " "
+                    s = s $i
+                }
+                return s
+            }
+            function short_ts(ts,   out) {
+                out = ts
+                sub(/^.*T/, "", out)
+                sub(/Z$/, "", out)
+                return out
+            }
+            function short_hash(value,   n) {
+                if (value == "" || value == "none") return value
+                n = length(value)
+                if (n <= 18) return value
+                return substr(value, 1, 10) "..." substr(value, n - 5)
+            }
+            function clear_map(map,   key) {
+                for (key in map) delete map[key]
+            }
+            function parse_kv(payload, map,   count, i, pos, token, key, value) {
+                clear_map(map)
+                count = split(payload, fields, " ")
+                for (i = 1; i <= count; i++) {
+                    token = fields[i]
+                    pos = index(token, "=")
+                    if (pos <= 1) continue
+                    key = substr(token, 1, pos - 1)
+                    value = substr(token, pos + 1)
+                    map[key] = value
+                }
+            }
+            function map_get(map, key, fallback) {
+                return (key in map && map[key] != "") ? map[key] : fallback
+            }
+
             BEGIN { show_result = 0 }
             /^✓ Workflow compiled$/ { print; next }
             /^✗/ { print; next }
             /^Failed to/ { print; next }
             /^Build failed:/ { print; next }
             /^\xE2\x9C\x97/ { print; next }
-            /^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* \[SIMULATION\] (Simulator Initialized|Running trigger.*|Execution finished signal received|Skipping WorkflowEngineV2)/ { print; next }
-            /^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* \[WORKFLOW\] WorkflowExecution(Start|Finish)/ { print; next }
-            /^[0-9]{4}-[0-9]{2}-[0-9]{2}T.* \[USER LOG\]/ { print; next }
             /^✓ Workflow Simulation Result:/ { print; show_result = 1; next }
             show_result == 1 {
                 if (NF == 0) next
                 print
                 show_result = 0
+                next
+            }
+
+            $2 == "[SIMULATION]" {
+                printf("[%s] sim: %s\n", short_ts($1), join_from(3))
+                next
+            }
+            $2 == "[WORKFLOW]" {
+                msg = join_from(3)
+                if (msg ~ /^WorkflowExecution(Start|Finish)/) {
+                    printf("[%s] workflow: %s\n", short_ts($1), msg)
+                }
+                next
+            }
+            $2 == "[USER" && $3 == "LOG]" {
+                if ($4 !~ /^\[[^]]+\]$/) {
+                    printf("[%s] note: %s\n", short_ts($1), join_from(4))
+                    next
+                }
+
+                asset = substr($4, 2, length($4) - 2)
+                payload = join_from(5)
+
+                if (payload ~ /^mode=/) {
+                    parse_kv(payload, kv)
+                    printf("[%s] %s plan: action=%s target=%s edge=%s funding=%s boros=%s exposure=%s hl=%s size=%s\n",
+                        short_ts($1), asset,
+                        map_get(kv, "action", "-"),
+                        map_get(kv, "target", "-"),
+                        map_get(kv, "edge", "-"),
+                        map_get(kv, "funding", "-"),
+                        map_get(kv, "boros", "-"),
+                        map_get(kv, "exposure", "-"),
+                        map_get(kv, "hl", "-"),
+                        map_get(kv, "size", "-"))
+                    next
+                }
+
+                if (payload ~ /^outcome=/) {
+                    parse_kv(payload, kv)
+                    printf("[%s] %s exec: outcome=%s sync=%s exec=%s\n",
+                        short_ts($1), asset,
+                        map_get(kv, "outcome", "-"),
+                        short_hash(map_get(kv, "syncTx", "-")),
+                        short_hash(map_get(kv, "executeTx", "-")))
+                    next
+                }
+
+                if (payload ~ /^result=/) {
+                    parse_kv(payload, kv)
+                    printf("[%s] %s result: %s\n",
+                        short_ts($1), asset, map_get(kv, "result", payload))
+                    next
+                }
+
+                printf("[%s] %s note: %s\n", short_ts($1), asset, payload)
                 next
             }
         '

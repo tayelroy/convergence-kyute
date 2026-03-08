@@ -232,7 +232,9 @@ export default function DashboardPage() {
       hedgeLastTimestamp,
       zeroSeriesSeed,
     );
-    const spreadBps = market.live.hlSpreadBps;
+    const decision = market.live.hedgeDecision;
+    const spreadBps = decision?.edgeBp ?? market.live.hlSpreadBps;
+    const spreadLabel = decision?.edgeBp != null ? "Edge" : "Spread";
     const borosAprDisplay = market.live.borosImpliedApr != null
       ? `${market.live.borosImpliedApr.toFixed(2)}%`
       : loading
@@ -244,10 +246,9 @@ export default function DashboardPage() {
         ? "..."
         : "--";
     const yieldAlert = spreadBps != null
-      ? `Spread is ${spreadBps.toFixed(1)} bps (HL ${hlAprDisplay} vs Boros ${borosAprDisplay}); ${hasHedge ? `hedge is active${hedgeSide ? ` (${hedgeSide})` : ""}.` : "no hedge is open."}`
+      ? `${spreadLabel} is ${spreadBps.toFixed(1)} bps (HL ${hlAprDisplay} vs Boros ${borosAprDisplay}); ${hasHedge ? `hedge is active${hedgeSide ? ` (${hedgeSide})` : ""}.` : "no hedge is open."}`
       : "Live sidecar data unavailable for this market.";
     const hlPositionLastUpdated = market.live.positionLastUpdate ?? market.live.historyPoints[market.live.historyPoints.length - 1]?.timestamp ?? null;
-    const decision = market.live.hedgeDecision;
     const hedgeDebugLabel = decision
       ? !decision.enabled
         ? "Market disabled"
@@ -357,7 +358,7 @@ export default function DashboardPage() {
                       </div>
                       <p className="mt-3 text-sm leading-relaxed text-[#d7c2a8]">{market.yieldAlert}</p>
                       <div className="mt-4 flex flex-wrap items-center gap-3 text-[11px] font-mono text-[#7a828f]">
-                        <span className="rounded-sm border border-[#1d232b] px-2 py-1">Spread {market.spreadBps != null ? `${market.spreadBps.toFixed(1)} bps` : "--"}</span>
+                        <span className="rounded-sm border border-[#1d232b] px-2 py-1">{market.live.hedgeDecision?.edgeBp != null ? "Edge" : "Spread"} {market.spreadBps != null ? `${market.spreadBps.toFixed(1)} bps` : "--"}</span>
                         <span className="rounded-sm border border-[#1d232b] px-2 py-1">HL {market.live.positionSide ?? "FLAT"}</span>
                         <span className="rounded-sm border border-[#1d232b] px-2 py-1">Wallet {borosWallet ? borosWallet.slice(0, 6) : "--"}</span>
                         {market.hedgeDebugLabel && (
